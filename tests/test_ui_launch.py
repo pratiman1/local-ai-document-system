@@ -13,7 +13,7 @@ Validates:
 6. PDF upload, PyMuPDF extraction, and page count reporting.
 7. Manual text editing and dirty state tracking (unsaved edits).
 8. Remove button clears document, resets metrics to 0, disables export buttons, and hides Remove button.
-9. Unsaved edits confirmation logic triggers when text is modified.
+9. TXT export is enabled when document is loaded, while DOCX and PDF remain permanently disabled with 'Coming soon' tooltips.
 """
 
 import sys
@@ -50,7 +50,7 @@ def create_temporary_pdf() -> Path:
 
 def run_ui_tests():
     print("\n" + "=" * 55)
-    print("🖥️  PYSIDE6 INTEGRATION & REMOVE/REPLACE TEST SUITE")
+    print("🖥️  PYSIDE6 INTEGRATION & EXPORT STATUS TEST SUITE")
     print("=" * 55 + "\n")
 
     app = QApplication.instance()
@@ -68,12 +68,16 @@ def run_ui_tests():
     print("Test 2: Verifying initial clean state before file upload...")
     assert not window.upload_panel.has_file_loaded(), "Upload panel reports file loaded on startup"
     assert window.upload_panel.btn_remove.isHidden(), "Remove button should be hidden on startup"
-    assert not window.export_panel.btn_export_txt.isEnabled(), "Export button should be disabled when no file is loaded"
+    assert not window.export_panel.btn_export_txt.isEnabled(), "Export TXT button should be disabled when no file is loaded"
+    assert not window.export_panel.btn_export_docx.isEnabled(), "Export DOCX button should be disabled"
+    assert not window.export_panel.btn_export_pdf.isEnabled(), "Export PDF button should be disabled"
+    assert window.export_panel.btn_export_docx.toolTip() == "Coming soon", "DOCX tooltip mismatch"
+    assert window.export_panel.btn_export_pdf.toolTip() == "Coming soon", "PDF tooltip mismatch"
     assert window.upload_panel.browse_button.text() == "Browse Files", "Expected 'Browse Files' initial text"
     assert "Pages: 0" in window.preview_panel.pages_metric.text(), "Pages metric should be 0 on startup"
     assert "Words: 0" in window.preview_panel.words_metric.text(), "Words metric should be 0 on startup"
     assert "Characters: 0" in window.preview_panel.chars_metric.text(), "Characters metric should be 0 on startup"
-    print("  ✅ Passed: Initial clean state confirmed (Remove button hidden, Export disabled, Badges at 0).")
+    print("  ✅ Passed: Initial clean state confirmed (Remove button hidden, Export buttons disabled, Badges at 0).")
 
     # 3. Dynamic System Information
     print("Test 3: Verifying dynamic system information detection...")
@@ -90,8 +94,8 @@ def run_ui_tests():
     assert window.upload_panel.btn_remove.toolTip() == "Remove this file and load another", "Remove button tooltip mismatch"
     print("  ✅ Passed: Close icon assets and tooltip verified.")
 
-    # 5. Simulate Loading a PDF
-    print("Test 5: Loading a 3-page PDF and testing active state...")
+    # 5. Simulate Loading a PDF & Verify Export Button States
+    print("Test 5: Loading a 3-page PDF and testing TXT enabled while DOCX/PDF remain disabled...")
     test_pdf_path = create_temporary_pdf()
     try:
         window._handle_file_selected(str(test_pdf_path))
@@ -99,12 +103,18 @@ def run_ui_tests():
         # Check document loaded state
         assert window.upload_panel.has_file_loaded(), "File should be marked as loaded"
         assert not window.upload_panel.btn_remove.isHidden(), "Remove button should be visible when file is loaded"
-        assert window.export_panel.btn_export_txt.isEnabled(), "Export button should be enabled after text is extracted"
         assert window.upload_panel.browse_button.text() == "Open Another File", "Browse button should say 'Open Another File'"
         assert "Pages: 3" in window.preview_panel.pages_metric.text(), "Page count metric should be 3"
         assert window.preview_panel.page_list.count() == 3, "Page list should contain 3 pages"
         assert not window.preview_panel.has_unsaved_edits(), "Should have no unsaved edits right after loading"
-        print("  ✅ Passed: File loaded successfully, Remove button revealed, Export enabled.")
+
+        # Explicit Requirement Verification: TXT enabled, DOCX & PDF permanently disabled with 'Coming soon'
+        assert window.export_panel.btn_export_txt.isEnabled(), "TXT export should be ENABLED after loading a document"
+        assert not window.export_panel.btn_export_docx.isEnabled(), "DOCX export must stay DISABLED after loading a document"
+        assert not window.export_panel.btn_export_pdf.isEnabled(), "PDF export must stay DISABLED after loading a document"
+        assert window.export_panel.btn_export_docx.toolTip() == "Coming soon", "DOCX tooltip must be 'Coming soon'"
+        assert window.export_panel.btn_export_pdf.toolTip() == "Coming soon", "PDF tooltip must be 'Coming soon'"
+        print("  ✅ Passed: TXT export is ENABLED; DOCX and PDF remain DISABLED with tooltip 'Coming soon'.")
 
         # 6. Test Unsaved Edits Detection
         print("Test 6: Testing unsaved edits tracking...")
@@ -125,7 +135,9 @@ def run_ui_tests():
         assert window._current_pdf_path == "", "Current PDF path was not cleared"
         assert window.get_document_text() == "", "Document text was not cleared"
         assert window.upload_panel.btn_remove.isHidden(), "Remove button should be hidden after clearing"
-        assert not window.export_panel.btn_export_txt.isEnabled(), "Export button should be disabled after clearing"
+        assert not window.export_panel.btn_export_txt.isEnabled(), "Export TXT button should be disabled after clearing"
+        assert not window.export_panel.btn_export_docx.isEnabled(), "DOCX button should stay disabled after clearing"
+        assert not window.export_panel.btn_export_pdf.isEnabled(), "PDF button should stay disabled after clearing"
         assert window.upload_panel.browse_button.text() == "Browse Files", "Browse button should reset to 'Browse Files'"
         assert window.upload_panel.file_info_badge.text() == "No document loaded", "Badge should reset to 'No document loaded'"
         assert "Pages: 0" in window.preview_panel.pages_metric.text(), "Pages metric should reset to 0"
@@ -133,14 +145,14 @@ def run_ui_tests():
         assert "Characters: 0" in window.preview_panel.chars_metric.text(), "Characters metric should reset to 0"
         assert window.preview_panel.page_list.count() == 0, "Page list should be empty after clearing"
         assert not window.preview_panel.has_unsaved_edits(), "Unsaved edits should be False after clearing"
-        print("  ✅ Passed: Remove file completely cleared text, reset metrics to 0, disabled export, and hid Remove button.")
+        print("  ✅ Passed: Remove file completely cleared state and reset all badges to 0.")
 
     finally:
         if test_pdf_path.exists():
             test_pdf_path.unlink()
 
     print("\n" + "=" * 55)
-    print("🎉 ALL PYSIDE6 INTEGRATION & REMOVE TESTS PASSED!")
+    print("🎉 ALL PYSIDE6 INTEGRATION & EXPORT TESTS PASSED!")
     print("=" * 55 + "\n")
 
 

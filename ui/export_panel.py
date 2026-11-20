@@ -5,10 +5,9 @@ Panel component handling document exports.
 Provides:
 - One-click export to plain text (.txt) files with full UTF-8 Indian script support.
 - Native system save dialog (macOS, Windows, Linux).
-- Dynamically enabled/disabled based on document presence.
+- TXT export is dynamically enabled/disabled based on document presence.
 - Explicit minimum widths and concise labels prevent text truncation.
-- Comprehensive hover tooltips guide the user on export choices.
-- Displays placeholders for future PDF and DOCX exports (Coming Soon).
+- DOCX and PDF export buttons are permanently disabled with 'Coming soon' tooltips.
 """
 
 from pathlib import Path
@@ -51,11 +50,11 @@ class ExportPanel(QWidget):
         export_label.setToolTip("Export the current document text locally to your computer.")
         layout.addWidget(export_label)
 
-        # Export as TXT Button with explicit tooltip (Initially disabled until file loaded)
+        # Export as TXT Button (Active when document is loaded)
         self.btn_export_txt = QPushButton("📄 Export TXT")
         self.btn_export_txt.setCursor(Qt.PointingHandCursor)
         self.btn_export_txt.setToolTip("Save extracted text as a UTF-8 text file.")
-        self.btn_export_txt.setEnabled(False)  # Disabled by default
+        self.btn_export_txt.setEnabled(False)  # Disabled by default until file loaded
         self.btn_export_txt.setStyleSheet(f"""
             QPushButton {{
                 background-color: #059669;
@@ -83,39 +82,40 @@ class ExportPanel(QWidget):
         self.btn_export_txt.clicked.connect(self._on_export_txt_clicked)
         layout.addWidget(self.btn_export_txt)
 
-        # Placeholders for future formats with clean "Coming Soon" badges (No dev labels)
+        # Inactive DOCX Export Button (Permanently disabled for now, tooltip 'Coming soon')
         self.btn_export_docx = QPushButton("📘 DOCX (Coming Soon)")
         self.btn_export_docx.setEnabled(False)
-        self.btn_export_docx.setToolTip("DOCX formatted export will be available in an upcoming update.")
+        self.btn_export_docx.setToolTip("Coming soon")
         self.btn_export_docx.setStyleSheet(f"""
             QPushButton {{
-                padding: 6px 12px;
+                padding: 5px 12px;
                 font-size: 11px;
                 font-family: {FONT_FAMILY_STACK};
                 color: #94a3b8;
-                border: 1px solid #e2e8f0;
+                border: 1px dashed #cbd5e1;
                 border-radius: 5px;
                 background-color: #f8fafc;
                 min-width: 130px;
-                min-height: 28px;
+                min-height: 26px;
             }}
         """)
         layout.addWidget(self.btn_export_docx)
 
+        # Inactive PDF Export Button (Permanently disabled for now, tooltip 'Coming soon')
         self.btn_export_pdf = QPushButton("📕 PDF (Coming Soon)")
         self.btn_export_pdf.setEnabled(False)
-        self.btn_export_pdf.setToolTip("Multilingual formatted PDF export will be available in an upcoming update.")
+        self.btn_export_pdf.setToolTip("Coming soon")
         self.btn_export_pdf.setStyleSheet(f"""
             QPushButton {{
-                padding: 6px 12px;
+                padding: 5px 12px;
                 font-size: 11px;
                 font-family: {FONT_FAMILY_STACK};
                 color: #94a3b8;
-                border: 1px solid #e2e8f0;
+                border: 1px dashed #cbd5e1;
                 border-radius: 5px;
                 background-color: #f8fafc;
                 min-width: 120px;
-                min-height: 28px;
+                min-height: 26px;
             }}
         """)
         layout.addWidget(self.btn_export_pdf)
@@ -135,8 +135,11 @@ class ExportPanel(QWidget):
             self._current_doc_name = ""
 
     def set_export_enabled(self, enabled: bool):
-        """Enables or disables export buttons depending on document presence."""
+        """Enables or disables TXT export depending on document presence."""
         self.btn_export_txt.setEnabled(enabled)
+        # DOCX and PDF remain permanently disabled
+        self.btn_export_docx.setEnabled(False)
+        self.btn_export_pdf.setEnabled(False)
         if not enabled:
             self.export_status.setText("")
 

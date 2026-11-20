@@ -6,17 +6,30 @@ Engineered for native, cross-platform performance across **macOS (Apple Silicon 
 
 ---
 
-## 🌟 Core Features
+## 🌟 Core Features (Current)
 
 - **100% Offline & Private:** Zero background telemetry, zero cloud AI calls, complete local document isolation.
-- **Cross-Platform Desktop UI:** Built on Qt6 (PySide6) with native font rendering and responsive layouts.
-- **High-Performance PDF Text Extraction:** Local extraction via PyMuPDF reading digital text layers in milliseconds.
-- **Dynamic Hardware Detection:** Automatically inspects the host operating system, processor architecture, and physical RAM without hardcoded values.
-- **Drag-and-Drop Ingestion:** Compact, space-efficient file drop zone supporting `.pdf` documents.
+- **Cross-Platform Desktop UI:** Built on Qt6 (PySide6) with native font rendering, compact layout, and responsive controls.
+- **Local PDF Text Extraction:** Fast digital text layer extraction via PyMuPDF.
+- **Dynamic Hardware Detection:** Automatically inspects host operating system, processor architecture, and physical RAM without hardcoded values.
+- **Drag-and-Drop Ingestion:** Space-efficient file drop zone supporting `.pdf` documents.
+- **File Management:** Quick "Remove File" (✕) button and "Open Another File" (Replace) option with unsaved-edits protection.
 - **Editable Document Preview:** Full-text editing mode allowing manual cleanup and in-place correction.
 - **Page-by-Page Inspector:** Individual page viewer with page-specific word counts and stats.
 - **Multilingual Language Selector:** Pre-configured for scheduled Indian languages (Hindi, Tamil, Telugu, Marathi, Bengali, Gujarati, Punjabi, Kannada, Malayalam, Odia, Assamese, Urdu) and English.
 - **One-Click Local TXT Export:** Non-destructive UTF-8 text export with overwrite protection.
+
+---
+
+## 🔮 Planned Features (Upcoming)
+
+The following capabilities are currently under development and planned for future releases:
+
+- **Local OCR Engine (Planned):** Scanned PDF and image text recognition using local OCR models (PaddleOCR / Tesseract) without cloud dependency.
+- **DOCX Document Export (Planned):** Exporting extracted and formatted documents to Microsoft Word (`.docx`) format.
+- **Formatted PDF Export (Planned):** Multilingual formatted PDF document export preserving Indian language scripts and layouts.
+- **Optional Cloud AI Enhancement (Planned):** Optional, user-authorized text cleanup and grammar enhancement via OpenAI ChatGPT or Google Gemini APIs with strict privacy disclosures and keychain credential storage.
+- **Offline Machine Translation (Planned):** Local translation models for scheduled Indian languages.
 
 ---
 
@@ -126,7 +139,7 @@ Local_AI_Document_System/
 │
 ├── ui/                        # Modular PySide6 GUI components
 │   ├── main_window.py         # Main application coordinator window
-│   ├── upload_panel.py        # Compact horizontal file drop zone
+│   ├── upload_panel.py        # Compact horizontal file drop zone & remove/replace controls
 │   ├── language_selector.py   # Target language selector with chevron arrow
 │   ├── preview_panel.py       # Metrics ribbon, full text editor, page breakdown
 │   ├── export_panel.py        # Export controls with tooltip guidance
@@ -142,7 +155,7 @@ Local_AI_Document_System/
 │   └── txt_exporter.py        # UTF-8 text export engine
 │
 ├── assets/                    # Application icons & visual resources
-│   └── icons/                 # Portable SVG vector icons
+│   └── icons/                 # Portable SVG vector icons (chevron, close)
 │
 ├── uploads/                   # Staged input files
 ├── exports/                   # Exported output documents
