@@ -1,60 +1,66 @@
 # ==============================================================================
 # Local AI Document System - .gitignore
+# Prevents user data, credentials, and virtual environments from being committed
 # ==============================================================================
 
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# C extensions
-*.so
-*.dylib
-*.dll
-
-# Virtual environments
-venv/
-env/
-ENV/
-env.bak/
-venv.bak/
-.venv/
-
-# Antigravity & IDE settings
-.gemini/
-.idea/
-.vscode/
-*.swp
-*.swo
-
-# Staging inputs & exports (keep directory structure tracked via .gitkeep)
+# 1. User Data & Staging Folders (keep directory structure tracked via .gitkeep)
 uploads/*
 !uploads/.gitkeep
 exports/*
 !exports/.gitkeep
 
-# macOS specific files
+# 2. User Document Files in Project Root (exclude source code requirements.txt)
+/*.pdf
+/*.docx
+/*.txt
+!requirements.txt
+
+# 3. Environment & Secret Credentials
+.env
+.env.*
+*.env
+
+# 4. Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# 5. Python Bytecode & Cache Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.dylib
+*.dll
+
+# 6. Operating System Metadata
 .DS_Store
 .AppleDouble
 .LSOverride
 ._*
 .Spotlight-V100
 .Trashes
-
-# Windows specific files
 Thumbs.db
 ehthumbs.db
 Desktop.ini
-
-# Linux specific files
 *~
 
-# Build and Packaging artifacts (PyInstaller)
+# 7. IDE & Antigravity Settings
+.gemini/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 8. Build & Packaging Artifacts (PyInstaller)
 build/
 dist/
 *.spec
 *.manifest
 
-# Test outputs & temporary files
+# 9. Test Logs & Temporary Files
 _test_*
 *.log
