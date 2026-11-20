@@ -1,0 +1,60 @@
+# ==============================================================================
+# Local AI Document System - .gitignore
+# ==============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+*.dylib
+*.dll
+
+# Virtual environments
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# Antigravity & IDE settings
+.gemini/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Staging inputs & exports (keep directory structure tracked via .gitkeep)
+uploads/*
+!uploads/.gitkeep
+exports/*
+!exports/.gitkeep
+
+# macOS specific files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows specific files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux specific files
+*~
+
+# Build and Packaging artifacts (PyInstaller)
+build/
+dist/
+*.spec
+*.manifest
+
+# Test outputs & temporary files
+_test_*
+*.log

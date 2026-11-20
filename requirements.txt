@@ -1,0 +1,13 @@
+# ==============================================================================
+# Local AI Multilingual Document Processing System - Phase 1 Requirements
+# ==============================================================================
+# All packages run 100% locally on your Mac. No cloud AI or external APIs.
+
+# Desktop GUI: Official Qt6 Python framework (Apple Silicon M1 native)
+PySide6>=6.6.0
+
+# PDF Extraction: Fast local PDF text extraction engine (PyMuPDF)
+pymupdf>=1.23.0
+
+# Web prototype dependency preserved
+streamlit>=1.30.0
