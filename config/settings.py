@@ -7,6 +7,7 @@ Designed for portable execution across macOS, Windows 10/11, and Linux.
 Supports both standard Python development and PyInstaller bundled environments.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -48,6 +49,27 @@ WINDOW_MIN_WIDTH = 880
 WINDOW_MIN_HEIGHT = 580
 WINDOW_DEFAULT_WIDTH = 1080
 WINDOW_DEFAULT_HEIGHT = 680
+
+# OCR Processing Configuration (High-performance, memory-bounded offline processing)
+OCR_DEFAULT_DPI = 300
+OCR_MIN_TEXT_CHARS = 10  # Minimum digital characters to consider a page having direct selectable text
+OCR_DEFAULT_OEM = 3      # Tesseract LSTM engine mode
+OCR_DEFAULT_PSM = 3      # Fully automatic page segmentation without OSD
+OCR_MAX_WORKERS = min(4, max(1, (os.cpu_count() or 2) - 1))  # Default worker pool size
+OCR_RECOVERY_INTERVAL = 10  # Checkpoint partial recovery every N completed pages
+OCR_CONFIDENCE_THRESHOLD = 80.0  # Quality threshold: highlight pages below 80% average confidence
+RECOVERY_DIR = UPLOADS_DIR   # Temporary recovery storage (ignored by git)
+
+# Offline Translation Configuration
+TRANSLATION_RECOVERY_INTERVAL = 10
+TRANSLATION_CHUNK_SIZE = 500   # Max characters per translation chunk to maintain low memory
+TRANSLATION_DEFAULT_ENGINE = "argos"
+
+# Optional Cloud AI Enhancement Configuration (Strictly OFF by default)
+AI_ENHANCE_ENABLED_DEFAULT = False
+AI_ENHANCE_MAX_CHARS = 4000     # Maximum characters sent per authorized request
+AI_DEFAULT_PROVIDER = "openai"  # Options: 'openai', 'gemini'
+STATUS_ONLINE_PROGRESS = "Online request in progress — Sending authorized snippet..."
 
 # Supported Document File Extensions
 SUPPORTED_DOCUMENT_TYPES = [".pdf"]

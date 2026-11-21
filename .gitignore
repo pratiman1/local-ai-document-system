@@ -9,10 +9,16 @@ uploads/*
 exports/*
 !exports/.gitkeep
 
-# 2. User Document Files in Project Root (exclude source code requirements.txt)
+# 2. User Document & Image Files in Project Root (exclude source code requirements.txt)
 /*.pdf
 /*.docx
 /*.txt
+/*.png
+/*.jpg
+/*.jpeg
+/*.webp
+/*.tiff
+/*.bmp
 !requirements.txt
 
 # 3. Environment & Secret Credentials
@@ -61,6 +67,23 @@ dist/
 *.spec
 *.manifest
 
-# 9. Test Logs & Temporary Files
+# 9. Test Logs, Recovery & Temporary Files
 _test_*
 *.log
+*.tmp
+.recovery_*
+*.recovery*
+
+# 10. Offline Language Models & Model Cache
+models/*
+!models/.gitkeep
+*.argosmodel
+*.bin
+*.onnx
+
+# 11. Security & API Keys
+*.key
+*.pem
+*.token
+credentials.json
+.keychain

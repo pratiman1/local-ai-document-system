@@ -77,7 +77,11 @@ def run_ui_tests():
     assert "Pages: 0" in window.preview_panel.pages_metric.text(), "Pages metric should be 0 on startup"
     assert "Words: 0" in window.preview_panel.words_metric.text(), "Words metric should be 0 on startup"
     assert "Characters: 0" in window.preview_panel.chars_metric.text(), "Characters metric should be 0 on startup"
-    print("  ✅ Passed: Initial clean state confirmed (Remove button hidden, Export buttons disabled, Badges at 0).")
+    assert window.ocr_progress_container.isHidden(), "OCR progress container should be hidden on startup"
+    assert "Tesseract" in window.lbl_ocr_info.text(), "OCR status line should mention active engine"
+    assert window.btn_cancel_ocr.toolTip() == "Cancel OCR processing and preserve all completed pages.", "Cancel tooltip mismatch"
+    assert window.lbl_ocr_info.toolTip() == "Active OCR engine, target language, and extraction distribution across document pages.", "OCR status tooltip mismatch"
+    print("  ✅ Passed: Initial clean state confirmed (Remove button hidden, Export buttons disabled, Badges at 0, OCR status ready).")
 
     # 3. Dynamic System Information
     print("Test 3: Verifying dynamic system information detection...")
@@ -114,6 +118,7 @@ def run_ui_tests():
         assert not window.export_panel.btn_export_pdf.isEnabled(), "PDF export must stay DISABLED after loading a document"
         assert window.export_panel.btn_export_docx.toolTip() == "Coming soon", "DOCX tooltip must be 'Coming soon'"
         assert window.export_panel.btn_export_pdf.toolTip() == "Coming soon", "PDF tooltip must be 'Coming soon'"
+        assert "Direct: 3" in window.lbl_ocr_info.text() or "3" in window.lbl_ocr_info.text(), "OCR status line should reflect page breakdown"
         print("  ✅ Passed: TXT export is ENABLED; DOCX and PDF remain DISABLED with tooltip 'Coming soon'.")
 
         # 6. Test Unsaved Edits Detection
@@ -138,6 +143,7 @@ def run_ui_tests():
         assert not window.export_panel.btn_export_txt.isEnabled(), "Export TXT button should be disabled after clearing"
         assert not window.export_panel.btn_export_docx.isEnabled(), "DOCX button should stay disabled after clearing"
         assert not window.export_panel.btn_export_pdf.isEnabled(), "PDF button should stay disabled after clearing"
+        assert window.export_panel.btn_open_folder.isHidden(), "Open Folder button should be hidden after clearing"
         assert window.upload_panel.browse_button.text() == "Browse Files", "Browse button should reset to 'Browse Files'"
         assert window.upload_panel.file_info_badge.text() == "No document loaded", "Badge should reset to 'No document loaded'"
         assert "Pages: 0" in window.preview_panel.pages_metric.text(), "Pages metric should reset to 0"
@@ -145,6 +151,8 @@ def run_ui_tests():
         assert "Characters: 0" in window.preview_panel.chars_metric.text(), "Characters metric should reset to 0"
         assert window.preview_panel.page_list.count() == 0, "Page list should be empty after clearing"
         assert not window.preview_panel.has_unsaved_edits(), "Unsaved edits should be False after clearing"
+        assert window.ocr_progress_container.isHidden(), "OCR progress container should be hidden after clearing"
+        assert "Ready" in window.lbl_ocr_info.text(), "OCR status line should reset to Ready"
         print("  ✅ Passed: Remove file completely cleared state and reset all badges to 0.")
 
     finally:
