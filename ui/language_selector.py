@@ -151,26 +151,28 @@ class LanguageSelector(QWidget):
         layout.addWidget(self.btn_translate)
 
         # Production-grade Informational Badge reflecting real offline translation state
-        info_frame = QFrame()
-        info_frame.setStyleSheet("""
+        self.info_frame = QFrame()
+        self.info_frame.setStyleSheet("""
             QFrame {
-                background-color: #f0fdf4;
-                border: 1px solid #bbf7d0;
+                background-color: #fefce8;
+                border: 1px solid #fef08a;
                 border-radius: 5px;
                 padding: 6px;
             }
         """)
-        info_layout = QHBoxLayout(info_frame)
+        info_layout = QHBoxLayout(self.info_frame)
         info_layout.setContentsMargins(6, 4, 6, 4)
 
-        info_text = QLabel("🌐 <b>Offline Translation:</b> Ready (Argos Translate). Fast local neural translation with automatic English pivoting.")
-        info_text.setWordWrap(True)
-        info_text.setStyleSheet(f"font-size: 10px; color: #166534; font-family: {FONT_FAMILY_STACK};")
-        info_frame.setToolTip("Offline machine translation is active. Runs 100% locally on your computer.")
-        info_layout.addWidget(info_text)
+        self.info_text = QLabel("🟡 <b>Status:</b> Model Missing • English to Hindi offline translation model is not installed.")
+        self.info_text.setWordWrap(True)
+        self.info_text.setStyleSheet(f"font-size: 10px; color: #854d0e; font-family: {FONT_FAMILY_STACK};")
+        self.info_frame.setToolTip("Offline translation model is not installed. Open Settings (⚙️) to import an .argosmodel file.")
+        info_layout.addWidget(self.info_text)
 
-        layout.addWidget(info_frame)
+        layout.addWidget(self.info_frame)
         layout.addStretch()
+
+        self._status_state = "model_missing"
 
     def _on_translate_clicked(self):
         self.translate_requested.emit()
@@ -190,3 +192,167 @@ class LanguageSelector(QWidget):
     def get_selected_language_name(self) -> str:
         """Returns the currently selected language display name."""
         return self.combo.currentText()
+
+    def get_language_name(self, code: str) -> str:
+        """Returns the human-readable language name for a 3-letter code."""
+        from config.languages import SUPPORTED_LANGUAGES
+        info = SUPPORTED_LANGUAGES.get(code.lower())
+        if info:
+            return info.name
+        return code.upper()
+
+    def get_translation_status(self) -> str:
+        """Returns the current translation status string ('ready', 'model_missing', 'translating', 'error')."""
+        return getattr(self, "_status_state", "ready")
+
+    def update_translation_status(
+        self,
+        state: str,
+        source_lang: str = "eng",
+        target_lang: str = "hin",
+        message: str = "",
+        tooltip: str = "",
+    ):
+        """
+        Updates the offline translation status indicator badge.
+        Supported states:
+        - 'ready' / 'ready_direct': Direct offline translation model ready.
+        - 'ready_pivot': Pivot translation through English ready.
+        - 'model_missing': Required language pair unavailable.
+        - 'translating': Translation currently running.
+        - 'error': Translation failed.
+        """
+        state_key = state.lower().strip()
+        self._status_state = state_key
+        src_name = self.get_language_name(source_lang)
+        tgt_name = self.get_language_name(target_lang)
+
+        if state_key in ("ready_compare", "compare_mode", "compare"):
+            self._status_state = "ready_compare"
+            details = message or f"{src_name} to {tgt_name} (IndicTrans2 vs Argos)"
+            self.info_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #faf5ff;
+                    border: 1px solid #d8b4fe;
+                    border-radius: 5px;
+                    padding: 6px;
+                }
+            """)
+            self.info_text.setStyleSheet(f"font-size: 10px; color: #6b21a8; font-family: {FONT_FAMILY_STACK};")
+            self.info_text.setText(f"🟣 <b>Status:</b> Compare Mode • {details}")
+            self.info_frame.setToolTip(tooltip or "Compare Mode active: Translates with primary & secondary engines sequentially to check agreement.")
+
+        elif state_key in ("ready_indictrans2", "indictrans2"):
+            self._status_state = "ready_indictrans2"
+            details = message or f"{src_name} to {tgt_name}: IndicTrans2 (direct)"
+            self.info_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #f0fdf4;
+                    border: 1px solid #86efac;
+                    border-radius: 5px;
+                    padding: 6px;
+                }
+            """)
+            self.info_text.setStyleSheet(f"font-size: 10px; color: #166534; font-family: {FONT_FAMILY_STACK};")
+            self.info_text.setText(f"🟢 <b>Status:</b> Ready (IndicTrans2) • {details}")
+            self.info_frame.setToolTip(tooltip or f"Direct AI4Bharat IndicTrans2 model ready for {src_name} to {tgt_name}.")
+
+        elif state_key in ("ready_direct", "direct"):
+            self._status_state = "ready_direct"
+            details = message or f"{src_name} to {tgt_name} (direct)"
+            self.info_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #f0fdf4;
+                    border: 1px solid #bbf7d0;
+                    border-radius: 5px;
+                    padding: 6px;
+                }
+            """)
+            self.info_text.setStyleSheet(f"font-size: 10px; color: #166534; font-family: {FONT_FAMILY_STACK};")
+            self.info_text.setText(f"🟢 <b>Status:</b> Ready (direct) • {details}")
+            self.info_frame.setToolTip(tooltip or f"Direct offline translation model installed and ready for {src_name} to {tgt_name}.")
+
+        elif state_key in ("ready_pivot", "pivot"):
+            self._status_state = "ready_pivot"
+            details = message or f"{src_name} to {tgt_name} (via English)"
+            self.info_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #f0fdf4;
+                    border: 1px solid #86efac;
+                    border-radius: 5px;
+                    padding: 6px;
+                }
+            """)
+            self.info_text.setStyleSheet(f"font-size: 10px; color: #15803d; font-family: {FONT_FAMILY_STACK};")
+            self.info_text.setText(f"🟢 <b>Status:</b> Ready via English • {details}")
+            self.info_frame.setToolTip(tooltip or f"Translation will pivot through English ({src_name} ➔ English ➔ {tgt_name}). Translation quality may be lower.")
+
+        elif state_key == "ready":
+            self._status_state = "ready"
+            details = message or f"{src_name} to {tgt_name} model ready"
+            self.info_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #f0fdf4;
+                    border: 1px solid #bbf7d0;
+                    border-radius: 5px;
+                    padding: 6px;
+                }
+            """)
+            self.info_text.setStyleSheet(f"font-size: 10px; color: #166534; font-family: {FONT_FAMILY_STACK};")
+            self.info_text.setText(f"🟢 <b>Status:</b> Ready • {details}")
+            self.info_frame.setToolTip(tooltip or "Offline translation model is installed and ready for translation.")
+
+        elif state_key in ("model_missing", "missing", "unavailable", "unavailable_in_argos"):
+            self._status_state = "model_missing"
+            if message:
+                details = message
+            else:
+                if source_lang.lower() == "eng" and target_lang.lower() == "hin":
+                    details = "English to Hindi offline translation model is not installed. Place translate-en_hi.argosmodel in models/argos/"
+                else:
+                    details = f"{src_name} to {tgt_name} offline translation model is missing. Place .argosmodel in models/argos/"
+
+            if "models/argos" not in details.lower() and "online ai" not in details.lower():
+                details = f"{details}. Place .argosmodel in models/argos/"
+
+            self.info_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #fefce8;
+                    border: 1px solid #fef08a;
+                    border-radius: 5px;
+                    padding: 6px;
+                }
+            """)
+            self.info_text.setStyleSheet(f"font-size: 10px; color: #854d0e; font-family: {FONT_FAMILY_STACK};")
+            self.info_text.setText(f"🟡 <b>Status:</b> Model Missing • {details}")
+            self.info_frame.setToolTip(tooltip or f"{details}\nPlace required .argosmodel files in models/argos/")
+
+        elif state_key in ("translating", "running", "in_progress"):
+            self._status_state = "translating"
+            details = message or f"Translating document ({src_name} ➔ {tgt_name})..."
+            self.info_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #eff6ff;
+                    border: 1px solid #bfdbfe;
+                    border-radius: 5px;
+                    padding: 6px;
+                }
+            """)
+            self.info_text.setStyleSheet(f"font-size: 10px; color: #1e40af; font-family: {FONT_FAMILY_STACK};")
+            self.info_text.setText(f"🔵 <b>Status:</b> Translating • {details}")
+            self.info_frame.setToolTip("Offline translation is currently running in background.")
+
+        elif state_key in ("error", "failed"):
+            self._status_state = "error"
+            details = message or "Translation failed."
+            self.info_frame.setStyleSheet("""
+                QFrame {
+                    background-color: #fef2f2;
+                    border: 1px solid #fecaca;
+                    border-radius: 5px;
+                    padding: 6px;
+                }
+            """)
+            self.info_text.setStyleSheet(f"font-size: 10px; color: #991b1b; font-family: {FONT_FAMILY_STACK};")
+            self.info_text.setText(f"🔴 <b>Status:</b> Error • {details}")
+            self.info_frame.setToolTip(f"Translation error: {details}")

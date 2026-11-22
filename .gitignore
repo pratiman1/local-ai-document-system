@@ -75,11 +75,15 @@ _test_*
 *.recovery*
 
 # 10. Offline Language Models & Model Cache
-models/*
+models/**
+!models/**/
+!models/**/.gitkeep
 !models/.gitkeep
 *.argosmodel
 *.bin
 *.onnx
+*.safetensors
+*.pt
 
 # 11. Security & API Keys
 *.key

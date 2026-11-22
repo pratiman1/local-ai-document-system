@@ -24,11 +24,19 @@ from PySide6.QtCore import QThread, Signal
 from config.settings import (
     TRANSLATION_RECOVERY_INTERVAL,
     TRANSLATION_CHUNK_SIZE,
+    TRANSLATION_AGREEMENT_THRESHOLD,
     RECOVERY_DIR,
 )
-from translation.base_translator import Translator, TranslationOutput
+from translation.base_translator import (
+    Translator,
+    TranslationOutput,
+    TranslatorNotAvailableError,
+    LanguagePairNotSupportedError,
+)
 from translation.translator_factory import get_translator
 from translation.quality_checker import evaluate_translation_sanity, TranslationSanityReport
+from translation.argos_translator import get_language_display_name
+from translation.agreement_metric import compute_agreement, AgreementResult
 
 
 def chunk_text(text: str, max_chunk_chars: int = TRANSLATION_CHUNK_SIZE) -> List[str]:
@@ -70,9 +78,14 @@ def translate_page(
     source_lang: str,
     target_lang: str,
     translator: Translator,
+    secondary_translator: Optional[Translator] = None,
+    compare_mode: bool = False,
+    agreement_threshold: float = 0.60,
 ) -> Dict[str, Any]:
     """
     Translates a single page's text chunk by chunk, maintaining page structure.
+    If compare_mode is True and secondary_translator is provided, runs the secondary
+    engine sequentially and computes lexical agreement between engines.
     """
     p_num = page_data.get("page_number", 1)
     orig_text = page_data.get("text", "")
@@ -84,12 +97,14 @@ def translate_page(
             "translated_text": "",
             "source_language": source_lang,
             "target_language": target_lang,
+            "engine": translator.get_name(),
             "was_pivoted": False,
             "pivot_notice": "",
             "word_count": 0,
             "char_count": 0,
             "sanity_report": evaluate_translation_sanity("", "", source_lang, target_lang),
             "skipped": False,
+            "comparison": None,
         }
 
     # Same language skip
@@ -100,12 +115,14 @@ def translate_page(
             "translated_text": orig_text,
             "source_language": source_lang,
             "target_language": target_lang,
+            "engine": translator.get_name(),
             "was_pivoted": False,
             "pivot_notice": f"Source and target languages are both '{source_lang}'. Translation skipped.",
             "word_count": len(orig_text.split()),
             "char_count": len(orig_text),
             "sanity_report": evaluate_translation_sanity(orig_text, orig_text, source_lang, target_lang),
             "skipped": True,
+            "comparison": None,
         }
 
     chunks = chunk_text(orig_text)
@@ -113,6 +130,7 @@ def translate_page(
     was_pivoted = False
     pivot_notice = ""
 
+    # Primary translation
     for chunk in chunks:
         out: TranslationOutput = translator.translate(chunk, source=source_lang, target=target_lang)
         translated_chunks.append(out.translated_text)
@@ -123,18 +141,55 @@ def translate_page(
     full_translated = "\n\n".join(translated_chunks)
     sanity = evaluate_translation_sanity(orig_text, full_translated, source_lang, target_lang)
 
+    # Optional Sequential Compare Mode (Never run in parallel to protect 8 GB RAM)
+    comparison_info = None
+    if compare_mode and secondary_translator is not None:
+        try:
+            sec_translated_chunks = []
+            for chunk in chunks:
+                sec_out: TranslationOutput = secondary_translator.translate(chunk, source=source_lang, target=target_lang)
+                sec_translated_chunks.append(sec_out.translated_text)
+            secondary_text = "\n\n".join(sec_translated_chunks)
+            agree_res = compute_agreement(full_translated, secondary_text, threshold=agreement_threshold)
+            comparison_info = {
+                "primary_engine": translator.get_name(),
+                "secondary_engine": secondary_translator.get_name(),
+                "secondary_text": secondary_text,
+                "agreement_score": agree_res.score,
+                "score_percent": agree_res.score_percent,
+                "is_flagged": agree_res.is_flagged,
+                "threshold": agree_res.threshold,
+                "word_f1": agree_res.word_f1,
+                "chrf_score": agree_res.chrf_score,
+                "notice": agree_res.notice,
+            }
+        except Exception as e:
+            comparison_info = {
+                "primary_engine": translator.get_name(),
+                "secondary_engine": secondary_translator.get_name(),
+                "secondary_text": "",
+                "agreement_score": 0.0,
+                "score_percent": 0.0,
+                "is_flagged": True,
+                "threshold": agreement_threshold,
+                "error": str(e),
+                "notice": f"Comparison failed: {str(e)}",
+            }
+
     return {
         "page_number": p_num,
         "original_text": orig_text,
         "translated_text": full_translated,
         "source_language": source_lang,
         "target_language": target_lang,
+        "engine": translator.get_name(),
         "was_pivoted": was_pivoted,
         "pivot_notice": pivot_notice,
         "word_count": len(full_translated.split()),
         "char_count": len(full_translated),
         "sanity_report": sanity,
         "skipped": False,
+        "comparison": comparison_info,
     }
 
 
@@ -166,11 +221,15 @@ def run_translation_pipeline_sync(
     source_lang: str,
     target_lang: str,
     translator: Optional[Translator] = None,
+    secondary_translator: Optional[Translator] = None,
+    compare_mode: bool = False,
+    agreement_threshold: float = 0.60,
     doc_id: str = "doc",
     progress_callback: Optional[Callable[[Dict[str, Any], int, int, float], None]] = None,
 ) -> Dict[str, Any]:
     """
     Runs document translation synchronously (for CLI / tests).
+    Supports sequential Compare Mode across two engines.
     """
     if translator is None:
         translator = get_translator("argos")
@@ -184,6 +243,8 @@ def run_translation_pipeline_sync(
             "full_translated_text": "",
             "was_pivoted": False,
             "skipped": False,
+            "compare_mode": compare_mode,
+            "flagged_count": 0,
         }
 
     # Same language check across whole doc
@@ -200,7 +261,38 @@ def run_translation_pipeline_sync(
             "was_pivoted": False,
             "skipped": True,
             "message": f"Source and target languages are both '{source_lang}'. Translation skipped.",
+            "compare_mode": False,
+            "flagged_count": 0,
         }
+
+    # Verify primary engine availability before starting
+    if not translator.is_available():
+        inst = translator.get_installation_instructions((source_lang, target_lang))
+        raise TranslatorNotAvailableError(
+            f"Translation engine '{translator.get_name()}' is not installed or available.",
+            instructions=inst,
+        )
+
+    # Verify primary language pair support before starting
+    if not translator.is_pair_supported(source_lang, target_lang):
+        inst = translator.get_installation_instructions((source_lang, target_lang))
+        from_name = get_language_display_name(source_lang)
+        to_name = get_language_display_name(target_lang)
+        if source_lang.lower() == "eng" and target_lang.lower() == "hin":
+            err_msg = "English to Hindi offline translation model is not installed."
+        else:
+            err_msg = f"{from_name} to {to_name} offline translation model is not installed."
+        raise LanguagePairNotSupportedError(
+            source_lang, target_lang,
+            message=err_msg,
+            instructions=inst,
+        )
+
+    # If Compare Mode requested, verify secondary engine availability
+    effective_compare_mode = False
+    if compare_mode and secondary_translator is not None:
+        if secondary_translator.is_available() and secondary_translator.is_pair_supported(source_lang, target_lang):
+            effective_compare_mode = True
 
     recovery_path = get_translation_recovery_path(doc_id)
     translated_pages = []
@@ -209,7 +301,15 @@ def run_translation_pipeline_sync(
     start_time = time.time()
 
     for idx, page in enumerate(pages):
-        trans_p = translate_page(page, source_lang, target_lang, translator)
+        trans_p = translate_page(
+            page,
+            source_lang,
+            target_lang,
+            translator,
+            secondary_translator=secondary_translator if effective_compare_mode else None,
+            compare_mode=effective_compare_mode,
+            agreement_threshold=agreement_threshold,
+        )
         translated_pages.append(trans_p)
         if trans_p.get("was_pivoted"):
             any_pivoted = True
@@ -229,20 +329,26 @@ def run_translation_pipeline_sync(
                 "doc_id": doc_id,
                 "total_pages": total_pages,
                 "completed": completed,
+                "primary_engine": translator.get_name(),
+                "compare_mode": effective_compare_mode,
                 "pages": translated_pages,
             })
 
     remove_translation_recovery(recovery_path)
     full_text = "\n\n--- Page Break ---\n\n".join(p["translated_text"] for p in translated_pages)
+    flagged_pages = [p for p in translated_pages if p.get("comparison") and p["comparison"].get("is_flagged")]
 
     return {
         "success": True,
         "page_count": total_pages,
         "translated_pages": translated_pages,
         "full_translated_text": full_text,
+        "primary_engine": translator.get_name(),
         "was_pivoted": any_pivoted,
         "pivot_notice": " ".join(pivot_notes),
         "skipped": False,
+        "compare_mode": effective_compare_mode,
+        "flagged_count": len(flagged_pages),
         "elapsed_seconds": time.time() - start_time,
     }
 
@@ -250,7 +356,7 @@ def run_translation_pipeline_sync(
 class TranslationWorkerThread(QThread):
     """
     Background worker thread translating documents page-by-page
-    without freezing the UI.
+    without freezing the UI. Supports sequential Compare Mode.
     """
     page_translated = Signal(dict, int, int, float)   # (page_dict, completed, total, eta_sec)
     translation_finished = Signal(dict)              # full_result
@@ -263,6 +369,9 @@ class TranslationWorkerThread(QThread):
         source_lang: str,
         target_lang: str,
         translator: Optional[Translator] = None,
+        secondary_translator: Optional[Translator] = None,
+        compare_mode: bool = False,
+        agreement_threshold: float = 0.60,
         doc_id: str = "doc",
         parent=None,
     ):
@@ -271,6 +380,9 @@ class TranslationWorkerThread(QThread):
         self.source_lang = source_lang
         self.target_lang = target_lang
         self.translator = translator or get_translator("argos")
+        self.secondary_translator = secondary_translator
+        self.compare_mode = compare_mode
+        self.agreement_threshold = agreement_threshold
         self.doc_id = doc_id
         self._is_cancelled = threading.Event()
 
@@ -291,6 +403,8 @@ class TranslationWorkerThread(QThread):
                 "full_translated_text": "",
                 "was_pivoted": False,
                 "skipped": False,
+                "compare_mode": self.compare_mode,
+                "flagged_count": 0,
             })
             return
 
@@ -309,10 +423,12 @@ class TranslationWorkerThread(QThread):
                 "was_pivoted": False,
                 "skipped": True,
                 "message": f"Source and target languages are both '{self.source_lang}'. Translation skipped.",
+                "compare_mode": False,
+                "flagged_count": 0,
             })
             return
 
-        # Verify engine availability before starting
+        # Verify primary engine availability before starting
         if not self.translator.is_available():
             inst = self.translator.get_installation_instructions((self.source_lang, self.target_lang))
             self.translation_error.emit(
@@ -320,6 +436,24 @@ class TranslationWorkerThread(QThread):
                 inst,
             )
             return
+
+        # Verify primary language pair support before starting page processing
+        if not self.translator.is_pair_supported(self.source_lang, self.target_lang):
+            inst = self.translator.get_installation_instructions((self.source_lang, self.target_lang))
+            from_name = get_language_display_name(self.source_lang)
+            to_name = get_language_display_name(self.target_lang)
+            if self.source_lang.lower() == "eng" and self.target_lang.lower() == "hin":
+                err_msg = "English to Hindi offline translation model is not installed."
+            else:
+                err_msg = f"{from_name} to {to_name} offline translation model is not installed."
+            self.translation_error.emit(err_msg, inst)
+            return
+
+        # Evaluate effective compare mode
+        effective_compare = False
+        if self.compare_mode and self.secondary_translator is not None:
+            if self.secondary_translator.is_available() and self.secondary_translator.is_pair_supported(self.source_lang, self.target_lang):
+                effective_compare = True
 
         recovery_path = get_translation_recovery_path(self.doc_id)
         translated_pages = []
@@ -332,7 +466,15 @@ class TranslationWorkerThread(QThread):
                 break
 
             try:
-                trans_p = translate_page(page, self.source_lang, self.target_lang, self.translator)
+                trans_p = translate_page(
+                    page,
+                    self.source_lang,
+                    self.target_lang,
+                    self.translator,
+                    secondary_translator=self.secondary_translator if effective_compare else None,
+                    compare_mode=effective_compare,
+                    agreement_threshold=self.agreement_threshold,
+                )
             except Exception as e:
                 trans_p = {
                     "page_number": page.get("page_number", idx + 1),
@@ -340,11 +482,13 @@ class TranslationWorkerThread(QThread):
                     "translated_text": f"[Translation error on page {idx+1}: {str(e)}]",
                     "source_language": self.source_lang,
                     "target_language": self.target_lang,
+                    "engine": self.translator.get_name(),
                     "was_pivoted": False,
                     "pivot_notice": "",
                     "word_count": 0,
                     "char_count": 0,
                     "sanity_report": evaluate_translation_sanity("", "", self.source_lang, self.target_lang),
+                    "comparison": None,
                     "error": str(e),
                 }
 
@@ -366,18 +510,25 @@ class TranslationWorkerThread(QThread):
                     "doc_id": self.doc_id,
                     "total_pages": total_pages,
                     "completed": completed,
+                    "primary_engine": self.translator.get_name(),
+                    "compare_mode": effective_compare,
                     "pages": translated_pages,
                 })
 
         full_text = "\n\n--- Page Break ---\n\n".join(p["translated_text"] for p in translated_pages)
+        flagged_pages = [p for p in translated_pages if p.get("comparison") and p["comparison"].get("is_flagged")]
+
         result_payload = {
             "success": True,
             "page_count": total_pages,
             "completed_count": len(translated_pages),
             "translated_pages": translated_pages,
             "full_translated_text": full_text,
+            "primary_engine": self.translator.get_name(),
             "was_pivoted": any_pivoted,
             "pivot_notice": " ".join(pivot_notes),
+            "compare_mode": effective_compare,
+            "flagged_count": len(flagged_pages),
             "was_cancelled": self._is_cancelled.is_set(),
             "elapsed_seconds": time.time() - start_time,
             "skipped": False,

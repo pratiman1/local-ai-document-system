@@ -29,6 +29,12 @@ else:
 UPLOADS_DIR = BASE_DIR / "uploads"
 EXPORTS_DIR = BASE_DIR / "exports"
 MODELS_DIR = BASE_DIR / "models"
+ARGOS_MODELS_DIR = MODELS_DIR / "argos"
+ARGOS_PACKAGES_DIR = ARGOS_MODELS_DIR / "packages"
+INDICTRANS2_MODELS_DIR = MODELS_DIR / "indictrans2"
+INDICTRANS2_EN_INDIC_DIR = INDICTRANS2_MODELS_DIR / "en-indic"
+INDICTRANS2_INDIC_EN_DIR = INDICTRANS2_MODELS_DIR / "indic-en"
+INDICTRANS2_INDIC_INDIC_DIR = INDICTRANS2_MODELS_DIR / "indic-indic"
 ASSETS_DIR = BASE_DIR / "assets"
 ICONS_DIR = ASSETS_DIR / "icons"
 
@@ -36,7 +42,19 @@ ICONS_DIR = ASSETS_DIR / "icons"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+ARGOS_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+ARGOS_PACKAGES_DIR.mkdir(parents=True, exist_ok=True)
+INDICTRANS2_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+INDICTRANS2_EN_INDIC_DIR.mkdir(parents=True, exist_ok=True)
+INDICTRANS2_INDIC_EN_DIR.mkdir(parents=True, exist_ok=True)
+INDICTRANS2_INDIC_INDIC_DIR.mkdir(parents=True, exist_ok=True)
 ICONS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Configure Argos Translate directories to stay 100% offline and inside application workspace
+os.environ.setdefault("XDG_DATA_HOME", str(ARGOS_MODELS_DIR / "share"))
+os.environ.setdefault("XDG_CONFIG_HOME", str(ARGOS_MODELS_DIR / "config"))
+os.environ.setdefault("XDG_CACHE_HOME", str(ARGOS_MODELS_DIR / "cache"))
+os.environ.setdefault("ARGOS_PACKAGES_DIR", str(ARGOS_PACKAGES_DIR))
 
 # Icon Paths: Using as_posix() ensures forward slashes in Qt stylesheets across Windows, Linux, and macOS
 CHEVRON_DOWN_ICON = (ICONS_DIR / "chevron_down.svg").as_posix()
@@ -64,6 +82,9 @@ RECOVERY_DIR = UPLOADS_DIR   # Temporary recovery storage (ignored by git)
 TRANSLATION_RECOVERY_INTERVAL = 10
 TRANSLATION_CHUNK_SIZE = 500   # Max characters per translation chunk to maintain low memory
 TRANSLATION_DEFAULT_ENGINE = "argos"
+TRANSLATION_ENGINE_PREFERENCE = "automatic"  # Options: 'automatic', 'argos_only', 'indictrans2_only'
+TRANSLATION_COMPARE_MODE = False             # Optional sequential engine comparison
+TRANSLATION_AGREEMENT_THRESHOLD = 0.60       # Flag pages with agreement score below 60%
 
 # Optional Cloud AI Enhancement Configuration (Strictly OFF by default)
 AI_ENHANCE_ENABLED_DEFAULT = False

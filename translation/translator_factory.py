@@ -9,12 +9,12 @@ AI4Bharat IndicTrans2 later) without changing document processing pipelines or U
 from typing import Dict, Type, List
 from translation.base_translator import Translator
 from translation.argos_translator import ArgosTranslator
+from translation.indictrans2_translator import IndicTrans2Translator
 
 
 _TRANSLATOR_REGISTRY: Dict[str, Type[Translator]] = {
     "argos": ArgosTranslator,
-    # Future drop-in engines can be registered here:
-    # "indictrans2": IndicTrans2Translator,
+    "indictrans2": IndicTrans2Translator,
 }
 
 _ACTIVE_TRANSLATORS: Dict[str, Translator] = {}

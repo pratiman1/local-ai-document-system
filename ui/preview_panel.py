@@ -440,8 +440,16 @@ class PreviewPanel(QWidget):
 
         if skipped:
             self.trans_quality_badge.setText("ℹ️ Same Language (Skipped)")
+        elif result.get("compare_mode"):
+            fc = result.get("flagged_count", 0)
+            if fc > 0:
+                self.trans_quality_badge.setText(f"🟣 Compare Mode ({fc} Flagged)")
+            else:
+                self.trans_quality_badge.setText("🟣 Compare Mode (High Agreement)")
         elif was_pivoted:
             self.trans_quality_badge.setText("⚠️ Pivoted (via English)")
+        elif "indictrans2" in str(result.get("primary_engine", "")).lower():
+            self.trans_quality_badge.setText("✓ Translated (IndicTrans2 Direct)")
         else:
             self.trans_quality_badge.setText("✓ Translated (Direct)")
 

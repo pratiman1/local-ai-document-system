@@ -33,6 +33,87 @@ The following capabilities are currently under development and planned for futur
 
 ---
 
+## 🌐 Offline Translation Models & Engines
+
+The application supports 100% offline neural translation with two pluggable offline engines: **Argos Translate** and **AI4Bharat IndicTrans2**, complete with automatic engine choice and optional **Compare Mode**.
+
+---
+
+### 🇮🇳 AI4Bharat IndicTrans2 Engine (`models/indictrans2/`)
+
+AI4Bharat IndicTrans2 provides state-of-the-art neural machine translation across 22 scheduled Indian languages and English. It supports **direct Indian language to Indian language translation** (e.g., Hindi to Tamil, Marathi to Bengali) without pivoting through English.
+
+#### Folder Layout for IndicTrans2 Models
+Place the downloaded model folders directly into `models/indictrans2/`:
+```text
+Local_AI_Document_System/
+└── models/
+    └── indictrans2/
+        ├── en-indic/       # English to Indic (22 languages)
+        │   ├── model.safetensors (or pytorch_model.bin)
+        │   ├── config.json
+        │   └── tokenizer files
+        ├── indic-en/       # Indic to English (22 languages)
+        │   ├── model.safetensors (or pytorch_model.bin)
+        │   ├── config.json
+        │   └── tokenizer files
+        └── indic-indic/    # Direct Indic to Indic (320M distilled model)
+            ├── model.safetensors (or pytorch_model.bin)
+            ├── config.json
+            └── tokenizer files
+```
+
+#### Download Sizes & Hugging Face Repositories (Distilled Models)
+- **English to Indic (`en-indic`):** ~200M params | Download: **~800 MB - 1 GB** | Disk: ~850 MB
+  - Repo: `ai4bharat/indictrans2-en-indic-dist-200M`
+- **Indic to English (`indic-en`):** ~200M params | Download: **~800 MB - 1 GB** | Disk: ~850 MB
+  - Repo: `ai4bharat/indictrans2-indic-en-dist-200M`
+- **Indic to Indic (`indic-indic`):** ~320M params | Download: **~1.2 GB - 1.5 GB** | Disk: ~1.4 GB
+  - Repo: `ai4bharat/indictrans2-indic-indic-dist-320M`
+
+#### Toolkit Installation Across Platforms
+To enable IndicTrans2 in your local environment, install the required packages:
+```bash
+pip install IndicTransToolkit transformers torch sentencepiece
+```
+- **macOS (Apple Silicon M1/M2/M3/M4):** Automatically utilizes Metal Performance Shaders (`mps`) hardware acceleration with strict memory management (< 1.5 GB RAM).
+- **Windows 10/11 & Linux:** Runs on CPU or NVIDIA CUDA GPU automatically.
+- **8 GB RAM Friendly:** Lazy-loads only the requested direction; unloads previous models and runs garbage collection before loading another direction.
+
+---
+
+### 🌐 Argos Translate Models (`models/argos/`)
+
+Place all downloaded `.argosmodel` files directly into the **`models/argos/`** folder:
+```text
+Local_AI_Document_System/
+└── models/
+    └── argos/
+        ├── translate-en_hi-1_0.argosmodel    # English to Hindi (direct)
+        ├── translate-hi_en-1_0.argosmodel    # Hindi to English (direct)
+        ├── translate-en_ta-1_0.argosmodel    # English to Tamil (direct)
+        └── translate-en_te-1_0.argosmodel    # English to Telugu (direct)
+```
+
+---
+
+### ⚡ Automatic Engine Routing & Compare Mode
+
+- **Automatic Engine Priority:**
+  1. **IndicTrans2 Direct:** Selected whenever an installed IndicTrans2 model covers the pair (e.g., direct Hindi ➔ Tamil with `indic-indic`).
+  2. **Argos Direct:** Selected when an Argos model is installed directly for the pair.
+  3. **Argos English Pivot:** Applied when no direct pair exists (e.g., Hindi ➔ English ➔ Tamil).
+  4. **Missing Model Guidance:** Specifies exact model files and target folders.
+- **User Preference Override:** In Settings (⚙️), you can force `Argos Translate Only`, `IndicTrans2 Only`, or keep `Automatic`.
+- **Sequential Compare Mode:**
+  - When both engines cover a language pair, Compare Mode translates each page sequentially (never parallel, safeguarding 8 GB RAM).
+  - Calculates lexical consensus using token F1 score and character n-gram overlap (chrF).
+  - Flags pages below the configured threshold (default 60%).
+  - Provides a side-by-side review dialog allowing the user to select the preferred translation per page.
+  - *Disclosure: "Agreement indicator, not an accuracy score; two models can agree and still be wrong."*
+
+---
+
 ## 💻 Cross-Platform Installation & Setup
 
 ### Prerequisites
@@ -161,22 +242,30 @@ Local_AI_Document_System/
 ├── exports/                   # Exported output documents
 │
 └── tests/                     # Automated test suites
-    ├── test_extractor.py      # PDF extraction tests
-    ├── test_txt_exporter.py   # TXT exporter tests
-    ├── test_system_info.py    # Hardware detection tests
-    └── test_ui_launch.py      # Cross-platform UI integration tests
+    ├── test_indictrans2_and_routing.py   # IndicTrans2, router & compare mode tests
+    ├── test_argos_model_management.py    # Argos offline model management tests
+    ├── test_translation.py               # Language detection & translation pipeline tests
+    ├── test_ocr.py                       # OCR engine & recovery tests
+    ├── test_ai_enhance.py                # Optional AI enhancement tests
+    ├── test_security_remediations.py     # Privacy & security audit tests
+    ├── test_export_dialog.py             # Export dialog & folder tests
+    ├── test_extractor.py                 # PDF extraction tests
+    ├── test_txt_exporter.py              # TXT exporter tests
+    ├── test_system_info.py               # Hardware detection tests
+    └── test_ui_launch.py                 # Cross-platform UI integration tests
 ```
 
 ---
 
-## 🧪 Running the Automated Test Suites
+## 🧪 Running the Automated Test Suites & Benchmark
 
 To verify all components locally:
 ```bash
-python tests/test_system_info.py
-python tests/test_txt_exporter.py
-python tests/test_extractor.py
-python tests/test_ui_launch.py
+# Run all 11 test suites
+for t in tests/test_*.py; do python "$t"; done
+
+# Run the cross-engine translation benchmark
+python tools/translation_benchmark.py
 ```
 
 ---

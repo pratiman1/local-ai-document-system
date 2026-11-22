@@ -45,6 +45,9 @@ from config.settings import (
     AI_ENHANCE_ENABLED_DEFAULT,
     AI_DEFAULT_PROVIDER,
     AI_ENHANCE_MAX_CHARS,
+    TRANSLATION_ENGINE_PREFERENCE,
+    TRANSLATION_COMPARE_MODE,
+    TRANSLATION_AGREEMENT_THRESHOLD,
 )
 from ui.upload_panel import UploadPanel
 from ui.language_selector import LanguageSelector
@@ -58,10 +61,12 @@ from ocr.language_mapping import map_app_lang_to_tesseract, get_missing_language
 from translation.language_detector import detect_document_language, DetectionResult
 from translation.translator_factory import get_translator
 from translation.translation_pipeline import TranslationWorkerThread
+from translation.router import resolve_translation_route
 from services.ai_provider import get_ai_provider, AIProviderError
 from services.keychain_manager import get_api_key, get_provider_config
 from ui.ai_enhance_dialog import AIEnhanceConfirmDialog, AIEnhanceResultDialog
 from ui.settings_dialog import SettingsDialog
+from ui.compare_review_dialog import CompareReviewDialog
 
 
 class MainWindow(QMainWindow):
@@ -77,9 +82,17 @@ class MainWindow(QMainWindow):
         self._detected_source_lang: str = "eng"
         self._ai_enhance_enabled: bool = AI_ENHANCE_ENABLED_DEFAULT
         self._ai_provider_name: str = AI_DEFAULT_PROVIDER
+        self._engine_preference: str = TRANSLATION_ENGINE_PREFERENCE
+        self._compare_mode: bool = TRANSLATION_COMPARE_MODE
+        self._agreement_threshold: float = TRANSLATION_AGREEMENT_THRESHOLD
         self._init_window()
         self._init_ui()
         self._connect_signals()
+        # Automatically scan models/argos/ folder on startup
+        translator = get_translator("argos")
+        if translator.is_available():
+            translator.scan_and_install_models_folder()
+        self._update_translation_status()
 
     def _init_window(self):
         self.setWindowTitle(f"{APP_NAME} (v{APP_VERSION}) — [100% Offline]")
@@ -589,11 +602,13 @@ class MainWindow(QMainWindow):
         # Enable translation and AI Enhance buttons
         self.language_selector.set_translate_enabled(has_text)
         self._update_ai_enhance_button_state()
+        self._update_translation_status()
 
     def _handle_language_corrected(self, lang_code: str):
         """Fires when user manually overrides the detected source language."""
         self._detected_source_lang = lang_code
         self.status_bar.showMessage(f"Source language manually set to: {lang_code}")
+        self._update_translation_status()
 
     def _handle_cancel_trans_clicked(self):
         """Cancels background translation while preserving completed pages."""
@@ -628,11 +643,44 @@ class MainWindow(QMainWindow):
             })
             return
 
-        translator = get_translator("argos")
-        if not translator.is_available():
-            inst = translator.get_installation_instructions((source_lang, target_lang))
-            QMessageBox.warning(self, "Translation Engine Missing", inst)
+        # Pre-flight check: Ensure required offline translation language pair is installed
+        route = resolve_translation_route(
+            source_lang,
+            target_lang,
+            engine_preference=self._engine_preference,
+            compare_mode=self._compare_mode,
+        )
+        if not route.get("can_translate", False):
+            self.language_selector.update_translation_status(
+                "model_missing",
+                source_lang=source_lang,
+                target_lang=target_lang,
+                message=route["message"],
+                tooltip=route["tooltip"],
+            )
+            self.status_bar.showMessage(f"⚠️ {STATUS_OFFLINE} • {route['status_line']}")
+            QMessageBox.warning(
+                self,
+                "Model Missing",
+                f"{route['message']}\n\nModels folders:\n• models/argos/ (for Argos models)\n• models/indictrans2/ (for IndicTrans2 models)",
+            )
             return
+
+        primary_translator = get_translator(route["primary_engine"])
+        secondary_translator = (
+            get_translator(route["secondary_engine"])
+            if route.get("can_compare") and route.get("secondary_engine")
+            else None
+        )
+
+        # Set status indicator to translating
+        self.language_selector.update_translation_status(
+            "translating",
+            source_lang=source_lang,
+            target_lang=target_lang,
+            message=route["status_line"],
+        )
+        self.status_bar.showMessage(f"🔵 {STATUS_OFFLINE} • Translating: {route['status_line']}...")
 
         total_pages = len(pages)
         self.trans_progress_bar.setRange(0, total_pages)
@@ -646,7 +694,10 @@ class MainWindow(QMainWindow):
             pages=pages,
             source_lang=source_lang,
             target_lang=target_lang,
-            translator=translator,
+            translator=primary_translator,
+            secondary_translator=secondary_translator,
+            compare_mode=route.get("can_compare", False),
+            agreement_threshold=self._agreement_threshold,
             doc_id=doc_stem,
             parent=self,
         )
@@ -669,18 +720,59 @@ class MainWindow(QMainWindow):
     def _handle_trans_pipeline_finished(self, result: Dict[str, Any]):
         self.trans_progress_container.hide()
         self.preview_panel.display_translation_result(result)
-        pivot_msg = " (Pivoted via English)" if result.get("was_pivoted") else ""
-        self.status_bar.showMessage(f"🟢 {STATUS_OFFLINE} • Translation completed{pivot_msg}")
+        self._update_translation_status()
+        route = resolve_translation_route(
+            self._detected_source_lang,
+            self.language_selector.get_selected_language_code(),
+            engine_preference=self._engine_preference,
+            compare_mode=self._compare_mode,
+        )
+        flagged_count = result.get("flagged_count", 0)
+        if result.get("compare_mode"):
+            if flagged_count > 0:
+                self.status_bar.showMessage(
+                    f"🟣 {STATUS_OFFLINE} • Compare Mode: {flagged_count} page(s) flagged (agreement < {int(self._agreement_threshold * 100)}%)"
+                )
+                self._prompt_compare_review(result)
+            else:
+                self.status_bar.showMessage(f"🟢 {STATUS_OFFLINE} • Translation completed: {route['status_line']} (High Agreement)")
+        else:
+            self.status_bar.showMessage(f"🟢 {STATUS_OFFLINE} • Translation completed: {route['status_line']}")
+
+    def _prompt_compare_review(self, result: Dict[str, Any]):
+        """Prompts the user to review side-by-side translation differences on flagged pages."""
+        pages = result.get("translated_pages", [])
+        if not pages:
+            return
+        dlg = CompareReviewDialog(pages, agreement_threshold=self._agreement_threshold, parent=self)
+        if dlg.exec() and dlg.modified:
+            # Reconstruct full translated text and update preview editor
+            full_text = "\n\n--- Page Break ---\n\n".join(p.get("translated_text", "") for p in pages)
+            result["full_translated_text"] = full_text
+            self.preview_panel.display_translation_result(result)
+            self.status_bar.showMessage("✓ Compare selections applied to document preview.")
 
     def _handle_trans_pipeline_cancelled(self, result: Dict[str, Any]):
         self.trans_progress_container.hide()
         self.preview_panel.display_translation_result(result)
+        self.language_selector.update_translation_status(
+            "ready",
+            source_lang=self._detected_source_lang,
+            target_lang=self.language_selector.get_selected_language_code(),
+        )
         comp = result.get("completed_count", 0)
         total = result.get("page_count", 0)
         self.status_bar.showMessage(f"⚠️ Translation Cancelled • Preserved {comp} of {total} translated pages")
 
     def _handle_trans_pipeline_error(self, message: str, instructions: str):
         self.trans_progress_container.hide()
+        self.language_selector.update_translation_status(
+            "error",
+            source_lang=self._detected_source_lang,
+            target_lang=self.language_selector.get_selected_language_code(),
+            message=message,
+        )
+        self.status_bar.showMessage(f"❌ Translation Error: {message}")
         msg = message
         if instructions:
             msg += f"\n\n{instructions}"
@@ -697,14 +789,23 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(
             ai_enhance_enabled=self._ai_enhance_enabled,
             current_provider=self._ai_provider_name,
+            engine_preference=self._engine_preference,
+            compare_mode=self._compare_mode,
+            agreement_threshold=self._agreement_threshold,
             parent=self,
         )
         if dlg.exec():
             self._ai_enhance_enabled = dlg.ai_enhance_enabled
             self._ai_provider_name = dlg.selected_provider
+            self._engine_preference = getattr(dlg, "engine_preference", self._engine_preference)
+            self._compare_mode = getattr(dlg, "compare_mode", self._compare_mode)
+            self._agreement_threshold = getattr(dlg, "agreement_threshold", self._agreement_threshold)
             self._update_ai_enhance_button_state()
             mode_text = "✨ Online AI Allowed" if self._ai_enhance_enabled else "🔒 100% Offline Processing Active"
             self.lbl_offline_guarantee.setText(mode_text)
+
+        # Refresh translation status in case models were imported or refreshed
+        self._update_translation_status()
 
     def _handle_ai_enhance_clicked(self):
         if not self._ai_enhance_enabled:
@@ -850,6 +951,7 @@ class MainWindow(QMainWindow):
                 pass
 
         self._current_pdf_path = ""
+        self._detected_source_lang = "eng"
         self.ocr_progress_container.hide()
         self.trans_progress_container.hide()
         self.upload_panel.reset_state()
@@ -860,6 +962,7 @@ class MainWindow(QMainWindow):
         self.export_panel.set_export_enabled(False)
         self.lbl_ocr_info.setText("⚙️ Engine: Tesseract (LSTM) • Language: English (eng) • Ready")
         self.status_bar.showMessage(f"🟢 {STATUS_OFFLINE} • Ready — Select or drop a PDF to begin")
+        self._update_translation_status()
 
     def _handle_export_completed(self, saved_path: str):
         """Marks text as saved once exported."""
@@ -883,6 +986,35 @@ class MainWindow(QMainWindow):
         self.lbl_ocr_info.setText(
             f"⚙️ Engine: Tesseract (LSTM) • Language: {lang_name} ({tess_code}) • Ready"
         )
+        self._update_translation_status()
+
+    def _update_translation_status(self):
+        """Updates the language selector status indicator based on current source/target pair and engine router."""
+        target_lang = self.language_selector.get_selected_language_code()
+        source_lang = self._detected_source_lang or "eng"
+
+        if not target_lang:
+            return
+
+        route = resolve_translation_route(
+            source_lang,
+            target_lang,
+            engine_preference=self._engine_preference,
+            compare_mode=self._compare_mode,
+        )
+
+        st = route["status"]
+        self.language_selector.update_translation_status(
+            st,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            message=route.get("status_line", route.get("message", "")),
+            tooltip=route.get("tooltip", ""),
+        )
+
+        # Update status bar with pair in use when document text is present
+        if bool(self.preview_panel.get_current_text().strip()):
+            self.status_bar.showMessage(f"🟢 {STATUS_OFFLINE} • Translation: {route['status_line']}")
 
     def get_document_text(self) -> str:
         """Returns the current original document text."""
