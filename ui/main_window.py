@@ -12,8 +12,9 @@ Assembles the modular panels:
 Coordinates remove/replace workflows with unsaved edits confirmation dialogs.
 """
 
+import json
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -28,12 +29,15 @@ from PySide6.QtWidgets import (
     QStatusBar,
     QMessageBox,
     QFileDialog,
+    QInputDialog,
 )
 from PySide6.QtCore import Qt
 
 from config.settings import (
     APP_NAME,
     APP_VERSION,
+    BASE_DIR,
+    EXPORTS_DIR,
     WINDOW_MIN_WIDTH,
     WINDOW_MIN_HEIGHT,
     WINDOW_DEFAULT_WIDTH,
@@ -49,6 +53,8 @@ from config.settings import (
     TRANSLATION_COMPARE_MODE,
     TRANSLATION_AGREEMENT_THRESHOLD,
 )
+
+PROJECT_ROOT = BASE_DIR
 from ui.upload_panel import UploadPanel
 from ui.language_selector import LanguageSelector
 from ui.preview_panel import PreviewPanel
@@ -64,9 +70,12 @@ from translation.translation_pipeline import TranslationWorkerThread
 from translation.router import resolve_translation_route
 from services.ai_provider import get_ai_provider, AIProviderError
 from services.keychain_manager import get_api_key, get_provider_config
+from services.redaction_manager import redact_sensitive_data, restore_sensitive_data
+from services.audit_logger import log_ai_request
 from ui.ai_enhance_dialog import AIEnhanceConfirmDialog, AIEnhanceResultDialog
 from ui.settings_dialog import SettingsDialog
 from ui.compare_review_dialog import CompareReviewDialog
+from exporters.pdf_reconstructor import PDFExportWorkerThread
 
 
 class MainWindow(QMainWindow):
@@ -79,12 +88,14 @@ class MainWindow(QMainWindow):
         self._current_pdf_path: str = ""
         self._ocr_worker: Optional[OCRWorkerThread] = None
         self._trans_worker: Optional[TranslationWorkerThread] = None
+        self._pdf_export_worker: Optional[PDFExportWorkerThread] = None
         self._detected_source_lang: str = "eng"
         self._ai_enhance_enabled: bool = AI_ENHANCE_ENABLED_DEFAULT
         self._ai_provider_name: str = AI_DEFAULT_PROVIDER
         self._engine_preference: str = TRANSLATION_ENGINE_PREFERENCE
         self._compare_mode: bool = TRANSLATION_COMPARE_MODE
         self._agreement_threshold: float = TRANSLATION_AGREEMENT_THRESHOLD
+        self._session_consent_cache = set()  # In-memory session consent cache: (provider_name, doc_id)
         self._init_window()
         self._init_ui()
         self._connect_signals()
@@ -419,6 +430,7 @@ class MainWindow(QMainWindow):
         self.upload_panel.browse_requested.connect(self._handle_browse_requested)
         self.upload_panel.remove_requested.connect(self._handle_remove_requested)
         self.export_panel.export_completed.connect(self._handle_export_completed)
+        self.export_panel.export_pdf_requested.connect(self._handle_export_pdf_requested)
         self.language_selector.language_changed.connect(self._handle_language_changed)
         self.language_selector.translate_requested.connect(self._handle_translate_requested)
         self.preview_panel.language_corrected.connect(self._handle_language_corrected)
@@ -616,6 +628,10 @@ class MainWindow(QMainWindow):
             self.lbl_trans_status.setText("Cancelling translation... preserving completed pages...")
             self.btn_cancel_trans.setEnabled(False)
             self._trans_worker.cancel()
+        if self._pdf_export_worker and self._pdf_export_worker.isRunning():
+            self.lbl_trans_status.setText("Cancelling PDF reconstruction...")
+            self.btn_cancel_trans.setEnabled(False)
+            self._pdf_export_worker.cancel()
 
     def _handle_translate_requested(self, sync: bool = False):
         """Executes offline translation across all pages using pluggable engine."""
@@ -716,10 +732,13 @@ class MainWindow(QMainWindow):
         eta_str = f"{max(1, int(eta_sec))}s" if eta_sec < 60 else f"{int(eta_sec // 60)}m {int(eta_sec % 60)}s"
         self.lbl_trans_status.setText(f"Page {completed} of {total} • ETA: {eta_str}")
         self.preview_panel.update_translation_page(page_dict, total)
+        if completed > 0:
+            self.export_panel.set_pdf_export_enabled(True)
 
     def _handle_trans_pipeline_finished(self, result: Dict[str, Any]):
         self.trans_progress_container.hide()
         self.preview_panel.display_translation_result(result)
+        self.export_panel.set_pdf_export_enabled(True)
         self._update_translation_status()
         route = resolve_translation_route(
             self._detected_source_lang,
@@ -807,6 +826,52 @@ class MainWindow(QMainWindow):
         # Refresh translation status in case models were imported or refreshed
         self._update_translation_status()
 
+    def _split_text_for_ai_enhance(self, text: str, max_chars: int = AI_ENHANCE_MAX_CHARS) -> List[str]:
+        """
+        Splits text into chunks of at most max_chars, breaking at paragraph,
+        line, sentence, or word boundaries.
+        """
+        if len(text) <= max_chars:
+            return [text]
+
+        chunks = []
+        remaining = text.strip()
+        while len(remaining) > max_chars:
+            candidate = remaining[:max_chars]
+            split_idx = -1
+            # 1. Paragraph boundary
+            p_idx = candidate.rfind("\n\n")
+            if p_idx > max_chars // 3:
+                split_idx = p_idx + 2
+            else:
+                # 2. Line boundary
+                l_idx = candidate.rfind("\n")
+                if l_idx > max_chars // 3:
+                    split_idx = l_idx + 1
+                else:
+                    # 3. Sentence boundary
+                    for sep in [". ", "? ", "! ", "। "]:
+                        s_idx = candidate.rfind(sep)
+                        if s_idx > max_chars // 3:
+                            split_idx = max(split_idx, s_idx + len(sep))
+                    # 4. Word boundary
+                    if split_idx == -1:
+                        w_idx = candidate.rfind(" ")
+                        if w_idx > max_chars // 3:
+                            split_idx = w_idx + 1
+                        else:
+                            split_idx = max_chars
+
+            chunk = remaining[:split_idx].strip()
+            if chunk:
+                chunks.append(chunk)
+            remaining = remaining[split_idx:].strip()
+
+        if remaining:
+            chunks.append(remaining)
+
+        return chunks or [text]
+
     def _handle_ai_enhance_clicked(self):
         if not self._ai_enhance_enabled:
             QMessageBox.information(
@@ -823,9 +888,6 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Empty Text", "No text or page available to enhance.")
             return
 
-        if len(text_to_send) > AI_ENHANCE_MAX_CHARS:
-            text_to_send = text_to_send[:AI_ENHANCE_MAX_CHARS]
-
         # Get Provider Instance
         prov_config = get_provider_config(self._ai_provider_name)
         api_key = get_api_key(self._ai_provider_name) or ""
@@ -840,61 +902,214 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Provider Error", f"Failed to initialize AI provider:\n{str(e)}")
             return
 
-        # 1. Mandatory Privacy Confirmation Dialog
-        confirm_dlg = AIEnhanceConfirmDialog(
-            text=text_to_send,
-            provider_name=provider.get_name(),
-            parent=self,
-        )
-        if confirm_dlg.exec() != 1 or not confirm_dlg.confirmed:
+        if not provider.is_configured():
+            QMessageBox.warning(
+                self,
+                "Provider Not Configured",
+                f"The AI provider '{provider.name()}' is not configured with an API key.\n\n"
+                "Please configure it in Settings (⚙️) before proceeding.",
+            )
             return
 
-        # 2. Status Bar indicates Online Mode while request is running
-        self.status_bar.showMessage(STATUS_ONLINE_PROGRESS)
-        self.conn_badge.setText("🟡 Online Request in Progress")
-        self.conn_badge.setStyleSheet("""
-            QLabel {
-                background-color: #fefce8;
-                color: #854d0e;
-                border: 1px solid #fef08a;
-                border-radius: 4px;
-                padding: 3px 8px;
-                font-size: 10px;
-                font-weight: 600;
-            }
-        """)
-        QApplication.processEvents()
+        # Split into chunks if exceeds maximum request size
+        chunks = self._split_text_for_ai_enhance(text_to_send, max_chars=AI_ENHANCE_MAX_CHARS)
+        total_chunks = len(chunks)
 
-        try:
-            enhanced_output = provider.enhance_text(text_to_send)
-        except Exception as e:
-            QMessageBox.critical(self, "AI Enhancement Failed", f"External API request failed:\n\n{str(e)}")
-            return
-        finally:
-            self.status_bar.showMessage(f"🟢 {STATUS_OFFLINE} • Ready")
-            self.conn_badge.setText("🟢 100% Offline Mode")
-            self.conn_badge.setStyleSheet("""
-                QLabel {
-                    background-color: #f0fdf4;
-                    color: #166534;
-                    border: 1px solid #bbf7d0;
-                    border-radius: 4px;
-                    padding: 3px 8px;
-                    font-size: 10px;
-                    font-weight: 600;
-                }
-            """)
+        # Session consent check key (specific to provider and active document)
+        doc_key = self._current_pdf_path or "active_session_document"
+        session_cache_key = (self._ai_provider_name, doc_key)
 
-        # 3. Side-by-side Review Dialog (Accept & Replace vs Reject)
+        enhanced_chunks = []
+        target_lang = self.language_selector.get_selected_language_code() or "eng"
+        source_lang = self._detected_source_lang or "eng"
+
+        # Obtain source context if enhancing translation
+        source_context = ""
+        if hasattr(self.preview_panel, "get_current_text"):
+            source_context = self.preview_panel.get_current_text().strip()
+
+        # Shared user instructions & task across chunks
+        active_task = "Fix grammar"
+        active_instruction = ""
+        active_redaction = False
+
+        for chunk_idx, chunk in enumerate(chunks, 1):
+            chunk_placeholder_map = {}
+            chunk_to_transmit = chunk
+
+            # Check if user already gave consent for this session and document
+            has_session_consent = session_cache_key in self._session_consent_cache
+
+            if not has_session_consent:
+                confirm_dlg = AIEnhanceConfirmDialog(
+                    text=chunk,
+                    provider_name=provider.name(),
+                    model_name=provider.model_name,
+                    source_text=source_context,
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    is_local=provider.is_local,
+                    endpoint_host=provider.get_host_name(),
+                    parent=self,
+                )
+                if confirm_dlg.exec() != 1 or not confirm_dlg.confirmed:
+                    # User cancelled: abort and ensure status is offline
+                    self.status_bar.showMessage(f"🟢 {STATUS_OFFLINE} • Ready")
+                    return
+
+                if confirm_dlg.do_not_ask_again:
+                    self._session_consent_cache.add(session_cache_key)
+
+                active_task = confirm_dlg.selected_task
+                active_instruction = confirm_dlg.user_instruction
+                active_redaction = confirm_dlg.redaction_enabled
+
+            # Apply redaction if enabled
+            if active_redaction:
+                chunk_to_transmit, chunk_placeholder_map = redact_sensitive_data(chunk)
+
+            # Update status bar & badges during processing
+            if provider.is_local:
+                self.status_bar.showMessage(f"🟢 Offline — Local Model Server request in progress ({provider.model_name})...")
+                self.conn_badge.setText("🟢 Offline (Local AI Server)")
+                self.conn_badge.setStyleSheet("""
+                    QLabel {
+                        background-color: #f0fdf4;
+                        color: #166534;
+                        border: 1px solid #bbf7d0;
+                        border-radius: 4px;
+                        padding: 3px 8px;
+                        font-size: 10px;
+                        font-weight: 600;
+                    }
+                """)
+            else:
+                self.status_bar.showMessage(f"🟡 Online request in progress — {provider.name()}...")
+                self.conn_badge.setText(f"🟡 Online ({provider.name()})")
+                self.conn_badge.setStyleSheet("""
+                    QLabel {
+                        background-color: #fefce8;
+                        color: #854d0e;
+                        border: 1px solid #fef08a;
+                        border-radius: 4px;
+                        padding: 3px 8px;
+                        font-size: 10px;
+                        font-weight: 600;
+                    }
+                """)
+            QApplication.processEvents()
+
+            try:
+                enhanced_output = provider.enhance(
+                    text=chunk_to_transmit,
+                    task=active_task,
+                    source_lang=source_lang,
+                    target_lang=target_lang,
+                    user_instructions=active_instruction,
+                )
+            except AIProviderError as pe:
+                QMessageBox.warning(self, "AI Enhancement Error", f"Provider error from {provider.name()}:\n\n{str(pe)}")
+                return
+            except Exception as e:
+                sanitized_e = provider._sanitize_error(str(e))
+                QMessageBox.critical(self, "AI Enhancement Failed", f"Request failed:\n\n{sanitized_e}")
+                return
+            finally:
+                self.status_bar.showMessage(f"🟢 {STATUS_OFFLINE} • Ready")
+                self.conn_badge.setText("🟢 100% Offline Mode")
+                self.conn_badge.setStyleSheet("""
+                    QLabel {
+                        background-color: #f0fdf4;
+                        color: #166534;
+                        border: 1px solid #bbf7d0;
+                        border-radius: 4px;
+                        padding: 3px 8px;
+                        font-size: 10px;
+                        font-weight: 600;
+                    }
+                """)
+
+            # Restore redacted placeholders if redaction was active
+            if chunk_placeholder_map:
+                enhanced_output = restore_sensitive_data(enhanced_output, chunk_placeholder_map)
+
+            enhanced_chunks.append(enhanced_output)
+
+            # Record in local metadata-only audit log (zero document text, zero keys)
+            log_ai_request(
+                provider=provider.name(),
+                model=provider.model_name,
+                char_count=len(chunk_to_transmit),
+                page_num=scope_desc,
+                is_local=provider.is_local,
+            )
+
+        full_enhanced_output = "\n\n".join(enhanced_chunks)
+
+        # Side-by-side Review Dialog (Accept & Replace vs Reject)
         review_dlg = AIEnhanceResultDialog(
             original_text=text_to_send,
-            enhanced_text=enhanced_output,
-            provider_name=provider.get_name(),
+            enhanced_text=full_enhanced_output,
+            provider_name=provider.name(),
+            source_lang=source_lang,
+            target_lang=target_lang,
             parent=self,
         )
         if review_dlg.exec() == 1 and review_dlg.accepted_result:
             self.preview_panel.apply_enhanced_text(review_dlg.enhanced_text, context_type)
             self.status_bar.showMessage(f"🟢 {STATUS_OFFLINE} • Replaced text with AI enhanced result ({scope_desc})")
+
+            # If user checked "Offer to add corrected terms to domain glossary"
+            if review_dlg.add_to_glossary:
+                self._prompt_add_glossary_term(source_lang, target_lang)
+
+    def _prompt_add_glossary_term(self, source_lang: str, target_lang: str):
+        """Offers to store a domain-specific term pair in the local glossary."""
+        src_term, ok1 = QInputDialog.getText(
+            self,
+            "Add to Domain Glossary",
+            f"Enter source term ({source_lang}):",
+        )
+        if not ok1 or not src_term.strip():
+            return
+
+        tgt_term, ok2 = QInputDialog.getText(
+            self,
+            "Add to Domain Glossary",
+            f"Enter corrected translation for '{src_term.strip()}' ({target_lang}):",
+        )
+        if ok2 and tgt_term.strip():
+            self._save_glossary_entry(source_lang, target_lang, src_term.strip(), tgt_term.strip())
+            QMessageBox.information(
+                self,
+                "Glossary Updated",
+                f"Added entry to {source_lang} glossary:\n\n• '{src_term.strip()}' ➔ '{tgt_term.strip()}'"
+            )
+
+    def _save_glossary_entry(self, source_lang: str, target_lang: str, source_term: str, target_term: str):
+        """Saves a term mapping to glossaries/{source_lang}.json."""
+        glossary_dir = Path(__file__).resolve().parent.parent / "glossaries"
+        glossary_dir.mkdir(parents=True, exist_ok=True)
+        glossary_file = glossary_dir / f"{source_lang}.json"
+
+        data = {}
+        if glossary_file.is_file():
+            try:
+                with open(glossary_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception:
+                data = {}
+
+        if target_lang not in data:
+            data[target_lang] = {}
+
+        data[target_lang][source_term] = target_term
+
+        try:
+            with open(glossary_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
 
     def _handle_ocr_pipeline_cancelled(self, result: Dict[str, Any]):
         """Fires when user cancels processing, preserving all completed pages."""
@@ -937,6 +1152,10 @@ class MainWindow(QMainWindow):
             self._trans_worker.cancel()
             self._trans_worker.wait()
 
+        if self._pdf_export_worker and self._pdf_export_worker.isRunning():
+            self._pdf_export_worker.cancel()
+            self._pdf_export_worker.wait()
+
         # Clean active document recovery checkpoints before clearing state
         if self._current_pdf_path:
             try:
@@ -968,6 +1187,181 @@ class MainWindow(QMainWindow):
         """Marks text as saved once exported."""
         self.preview_panel.mark_saved()
         self.status_bar.showMessage(f"🟢 {STATUS_OFFLINE} • Saved to: {saved_path}")
+
+    def _handle_export_pdf_requested(self, target_save_path: Optional[str] = None, sync: bool = False):
+        """Launches the book-format PDF reconstruction export workflow."""
+        if not self._current_pdf_path or not Path(self._current_pdf_path).is_file():
+            QMessageBox.warning(self, "Export Warning", "Original PDF source document is not available.")
+            return
+
+        # Retrieve per-page translated text from live on-screen panes & preview state
+        page_map, missing_pages, error_msg = self.preview_panel.get_translated_pages_for_export()
+        if error_msg:
+            QMessageBox.warning(self, "Page Break Mismatch", error_msg)
+            return
+
+        if not page_map:
+            QMessageBox.warning(
+                self,
+                "Export Warning",
+                "No translated text available to export into PDF. Please run translation first.",
+            )
+            return
+
+        total_pages = len(self.preview_panel._pages_data) if self.preview_panel._pages_data else len(page_map)
+
+        # Incomplete translation handling: warn with missing pages and offer choice
+        if missing_pages and QApplication.platformName() != "offscreen":
+            missing_str = ", ".join(str(p) for p in sorted(missing_pages))
+            msg_box = QMessageBox(self)
+            msg_box.setIcon(QMessageBox.Warning)
+            msg_box.setWindowTitle("Incomplete Translation")
+            msg_box.setText(
+                f"Translation is incomplete. The following page(s) have not been translated yet:\n\n"
+                f"Pages: {missing_str}\n\n"
+                f"Do you want to export anyway, keeping original English on missing pages?"
+            )
+            btn_export_anyway = msg_box.addButton(
+                "Export anyway, keeping original English on missing pages",
+                QMessageBox.AcceptRole,
+            )
+            btn_cancel = msg_box.addButton("Cancel", QMessageBox.RejectRole)
+            msg_box.setDefaultButton(btn_cancel)
+            msg_box.exec()
+
+            if msg_box.clickedButton() != btn_export_anyway:
+                return
+
+        target_lang = self.language_selector.get_selected_language_code() or "hin"
+        lang_label = "hindi" if target_lang == "hin" else target_lang
+        doc_stem = Path(self._current_pdf_path).stem
+        default_filename = f"{doc_stem}_{lang_label}_translated_book.pdf"
+        export_dir = self.export_panel.get_export_dir()
+        default_path = str(export_dir / default_filename)
+
+        if target_save_path:
+            save_path = target_save_path
+        else:
+            save_path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export Book-Format Translated PDF",
+                default_path,
+                "PDF Files (*.pdf);;All Files (*)",
+            )
+
+        if not save_path:
+            return
+
+        target_path = Path(save_path).resolve()
+
+        if target_path.exists() and not target_save_path:
+            reply = QMessageBox.question(
+                self,
+                "Confirm Overwrite",
+                f"A file named '{target_path.name}' already exists in this folder.\n\nDo you want to replace it?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        # Prepare checkpoint data from current preview panel pages & live edits
+        block_ckpt_path = EXPORTS_DIR / f"{doc_stem}_block_checkpoint.json"
+        if not block_ckpt_path.is_file() and "poetry" in doc_stem.lower():
+            block_ckpt_path = EXPORTS_DIR / "poetry_11p_block_checkpoint.json"
+
+        block_data_by_page = {}
+        if block_ckpt_path.is_file():
+            try:
+                with open(block_ckpt_path, "r", encoding="utf-8") as f:
+                    block_data_by_page = json.load(f).get("pages", {})
+            except Exception:
+                block_data_by_page = {}
+
+        checkpoint_pages = {}
+        for p_idx in range(total_pages):
+            p_num = p_idx + 1
+            orig_text = ""
+            if p_idx < len(self.preview_panel._pages_data):
+                p_info = self.preview_panel._pages_data[p_idx]
+                p_num = p_info.get("page_number", p_num)
+                orig_text = p_info.get("cleaned_text", p_info.get("text", ""))
+
+            trans_text = page_map.get(p_num, "")
+            is_fallback = False
+            if not trans_text and p_num in missing_pages:
+                trans_text = orig_text
+                is_fallback = True
+
+            page_blocks = block_data_by_page.get(str(p_num), {}).get("blocks")
+            checkpoint_pages[str(p_num)] = {
+                "page_number": p_num,
+                "translated_text": trans_text,
+                "cleaned_text": orig_text,
+                "is_fallback_original": is_fallback,
+                "blocks": page_blocks,
+            }
+        checkpoint_data = {"pages": checkpoint_pages}
+
+        # Show progress container
+        total_pages = len(checkpoint_pages)
+        self.trans_progress_bar.setRange(0, total_pages)
+        self.trans_progress_bar.setValue(0)
+        self.lbl_trans_status.setText(f"Reconstructing book PDF: Page 0 of {total_pages} • Estimating time...")
+        self.btn_cancel_trans.setEnabled(True)
+        self.trans_progress_container.show()
+
+        self._pdf_export_worker = PDFExportWorkerThread(
+            source_pdf_path=self._current_pdf_path,
+            output_pdf_path=str(target_path),
+            checkpoint_data=checkpoint_data,
+            parent=self,
+        )
+        self._pdf_export_worker.progress_updated.connect(self._handle_pdf_export_progress)
+        self._pdf_export_worker.export_finished.connect(self._handle_pdf_export_finished)
+        self._pdf_export_worker.export_error.connect(self._handle_pdf_export_error)
+        self._pdf_export_worker.start()
+
+        if sync or QApplication.platformName() == "offscreen":
+            self._pdf_export_worker.wait()
+
+    def _handle_pdf_export_progress(self, completed: int, total: int, eta_sec: float):
+        self.trans_progress_bar.setValue(completed)
+        eta_str = f"{max(1, int(eta_sec))}s" if eta_sec < 60 else f"{int(eta_sec // 60)}m {int(eta_sec % 60)}s"
+        self.lbl_trans_status.setText(f"Reconstructing PDF: Page {completed} of {total} • ETA: {eta_str}")
+
+    def _handle_pdf_export_finished(self, summary: dict):
+        self.trans_progress_container.hide()
+        if summary.get("cancelled"):
+            self.status_bar.showMessage("⚠️ PDF Export cancelled.")
+            return
+
+        out_path = summary.get("output_path", "")
+        self.export_panel._last_export_dir = Path(out_path).parent
+        self.export_panel._last_saved_file = out_path
+        self.export_panel.export_status.setText(f"✓ Saved to {Path(out_path).name}")
+        self.export_panel.btn_open_folder.show()
+        self.export_panel.export_completed.emit(out_path)
+
+        if QApplication.platformName() != "offscreen":
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("PDF Export Successful")
+            msg_box.setIcon(QMessageBox.Information)
+            size_mb = summary.get("file_size_bytes", 0) / (1024 * 1024)
+            msg_box.setText(
+                f"Book-format Hindi PDF reconstructed successfully:\n\n{out_path}\n\n"
+                f"Pages: {summary.get('completed_pages', 0)} • File Size: {size_mb:.1f} MB\n\n"
+                f"Layout geometry, embedded photos, borders, and vector tables preserved."
+            )
+            msg_box.addButton("Open Folder", QMessageBox.ActionRole)
+            btn_ok = msg_box.addButton("OK", QMessageBox.AcceptRole)
+            msg_box.setDefaultButton(btn_ok)
+            msg_box.exec()
+
+    def _handle_pdf_export_error(self, err_msg: str):
+        self.trans_progress_container.hide()
+        if QApplication.platformName() != "offscreen":
+            QMessageBox.critical(self, "PDF Export Error", f"An error occurred during PDF reconstruction:\n\n{err_msg}")
 
     def _handle_language_changed(self, lang_code: str):
         lang_name = self.language_selector.get_selected_language_name()
@@ -1051,7 +1445,7 @@ class MainWindow(QMainWindow):
                 return
 
         # 2. Cooperatively cancel and wait for background workers
-        for worker in (self._ocr_worker, self._trans_worker):
+        for worker in (self._ocr_worker, self._trans_worker, self._pdf_export_worker):
             if worker and worker.isRunning():
                 worker.cancel()
                 if not worker.wait(3000):

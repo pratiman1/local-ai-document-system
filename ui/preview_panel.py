@@ -11,7 +11,8 @@ Panel component providing dual-pane inspection, manual correction, and honest qu
    - Source language detection badge with low-confidence / Hindi-Marathi correction dropdown.
 """
 
-from typing import List, Dict, Any, Optional
+import re
+from typing import List, Dict, Any, Optional, Tuple
 from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -431,9 +432,11 @@ class PreviewPanel(QWidget):
         """Populates the complete translation result."""
         full_trans = result.get("full_translated_text", "")
         self._translated_pages = result.get("translated_pages", [])
-        self._original_trans_text = full_trans
-        self._is_dirty_trans = False
+        self.trans_editor.blockSignals(True)
         self.trans_editor.setPlainText(full_trans)
+        self.trans_editor.blockSignals(False)
+        self._original_trans_text = self.trans_editor.toPlainText()
+        self._is_dirty_trans = False
 
         was_pivoted = result.get("was_pivoted", False)
         skipped = result.get("skipped", False)
@@ -456,7 +459,9 @@ class PreviewPanel(QWidget):
         # Sync current page
         curr_row = self.page_list.currentRow()
         if 0 <= curr_row < len(self._translated_pages):
+            self.single_page_trans_editor.blockSignals(True)
             self.single_page_trans_editor.setPlainText(self._translated_pages[curr_row].get("translated_text", ""))
+            self.single_page_trans_editor.blockSignals(False)
 
     def set_detected_language(self, det: DetectionResult):
         """Displays honest source language detection and activates correction dropdown if needed."""
@@ -619,6 +624,66 @@ class PreviewPanel(QWidget):
 
     def get_translated_text(self) -> str:
         return self.trans_editor.toPlainText()
+
+    def get_translated_pages_for_export(self) -> Tuple[Dict[int, str], List[int], Optional[str]]:
+        """
+        Collects per-page translated text for export from on-screen panes & _translated_pages.
+        Returns:
+            (page_map, missing_pages, error_message)
+            - page_map: {page_number: translated_text}
+            - missing_pages: list of page numbers lacking translation
+            - error_message: string if page break count does not match total_pages on full-doc edits
+        """
+        total_pages = len(self._pages_data) if self._pages_data else len(self._translated_pages)
+        if total_pages == 0:
+            return {}, [], "No document loaded to export."
+
+        full_trans_text = self.trans_editor.toPlainText().strip()
+        if not full_trans_text and not any(bool(p.get("translated_text", "").strip()) for p in self._translated_pages):
+            return {}, list(range(1, total_pages + 1)), None
+
+        page_map: Dict[int, str] = {}
+
+        # 1. If user edited the full document translated pane directly:
+        if self._is_dirty_trans:
+            raw_text = self.trans_editor.toPlainText()
+            # Split by page breaks (robust regex preserving blank pages)
+            chunks = [c.strip() for c in re.split(r'\s*---\s*Page Break\s*---\s*', raw_text)]
+
+            if total_pages > 1 and len(chunks) != total_pages:
+                return {}, [], (
+                    f"Page break count mismatch in edited translated text:\n\n"
+                    f"Found {len(chunks)} page section(s), but document has {total_pages} pages.\n\n"
+                    f"Please verify that each page boundary contains '--- Page Break ---' before exporting."
+                )
+
+            for idx, chunk in enumerate(chunks):
+                p_num = self._pages_data[idx].get("page_number", idx + 1) if idx < len(self._pages_data) else idx + 1
+                page_map[p_num] = chunk
+                # Keep _translated_pages synchronized
+                if idx < len(self._translated_pages):
+                    self._translated_pages[idx]["translated_text"] = chunk
+        else:
+            # 2. Sync active single page editor if user made an edit in the Page-by-Page tab
+            curr_row = self.page_list.currentRow()
+            if 0 <= curr_row < len(self._translated_pages):
+                self._translated_pages[curr_row]["translated_text"] = self.single_page_trans_editor.toPlainText()
+
+            # Build from _translated_pages
+            for idx, p in enumerate(self._translated_pages):
+                p_num = p.get("page_number", idx + 1)
+                text = p.get("translated_text", "").strip()
+                if text:
+                    page_map[p_num] = text
+
+            # Fallback if _translated_pages was empty but full_trans_text has content:
+            if not page_map and full_trans_text:
+                if total_pages == 1:
+                    page_map[1] = full_trans_text
+
+        # Determine missing pages
+        missing_pages = [p_num for p_num in range(1, total_pages + 1) if not page_map.get(p_num)]
+        return page_map, missing_pages, None
 
     def get_bilingual_side_by_side_text(self) -> str:
         """Generates clean dual-column or alternating bilingual text for export."""

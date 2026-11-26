@@ -71,6 +71,8 @@ dist/
 _test_*
 *.log
 *.tmp
+*.bak*
+tools/*.json
 .recovery_*
 *.recovery*
 

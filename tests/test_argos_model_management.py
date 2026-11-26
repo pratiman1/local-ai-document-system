@@ -326,6 +326,7 @@ def run_tests():
         # =============================================================
         print("\n[9/10] Automatic Selection on Language Change (No Settings Needed)...")
         main_win = MainWindow()
+        main_win._engine_preference = "argos_only"
         main_win.preview_panel._pages_data = [{"page_number": 1, "text": "Test sample text"}]
         main_win._detected_source_lang = "hin"
 

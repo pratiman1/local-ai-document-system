@@ -84,9 +84,11 @@ class ExportPanel(QWidget):
 
     Signals:
         export_completed (str): Emitted with the path of the successfully exported file.
+        export_pdf_requested (): Emitted when user clicks Export PDF.
     """
 
     export_completed = Signal(str)
+    export_pdf_requested = Signal()
 
     def __init__(self, parent: QWidget = None):
         super().__init__(parent)
@@ -173,7 +175,7 @@ class ExportPanel(QWidget):
         """)
         layout.addWidget(self.btn_export_docx)
 
-        # Inactive PDF Export Button (Permanently disabled for now, tooltip 'Coming soon')
+        # PDF Export Button (active when translated text exists)
         self.btn_export_pdf = QPushButton("📕 PDF (Coming Soon)")
         self.btn_export_pdf.setEnabled(False)
         self.btn_export_pdf.setToolTip("Coming soon")
@@ -190,6 +192,7 @@ class ExportPanel(QWidget):
                 min-height: 26px;
             }}
         """)
+        self.btn_export_pdf.clicked.connect(self._on_export_pdf_clicked)
         layout.addWidget(self.btn_export_pdf)
 
         layout.addStretch()
@@ -233,13 +236,64 @@ class ExportPanel(QWidget):
     def set_export_enabled(self, enabled: bool):
         """Enables or disables TXT export depending on document presence."""
         self.btn_export_txt.setEnabled(enabled)
-        # DOCX and PDF remain permanently disabled
+        # DOCX remains permanently disabled
         self.btn_export_docx.setEnabled(False)
-        self.btn_export_pdf.setEnabled(False)
         if not enabled:
+            self.set_pdf_export_enabled(False)
             self.export_status.setText("")
             self.btn_open_folder.hide()
             self._last_saved_file = ""
+
+    def set_pdf_export_enabled(self, enabled: bool):
+        """Enables or disables book-format PDF export."""
+        self.btn_export_pdf.setEnabled(enabled)
+        if enabled:
+            self.btn_export_pdf.setText("📕 Export PDF")
+            self.btn_export_pdf.setToolTip("Export translated document as a book-format PDF preserving layout and graphics.")
+            self.btn_export_pdf.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #dc2626;
+                    color: #ffffff;
+                    font-weight: bold;
+                    border: none;
+                    border-radius: 5px;
+                    padding: 6px 14px;
+                    font-size: 11.5px;
+                    font-family: {FONT_FAMILY_STACK};
+                    min-width: 95px;
+                    min-height: 28px;
+                }}
+                QPushButton:hover {{
+                    background-color: #b91c1c;
+                }}
+                QPushButton:pressed {{
+                    background-color: #991b1b;
+                }}
+                QPushButton:disabled {{
+                    background-color: #cbd5e1;
+                    color: #94a3b8;
+                }}
+            """)
+        else:
+            self.btn_export_pdf.setText("📕 PDF (Coming Soon)")
+            self.btn_export_pdf.setToolTip("Coming soon")
+            self.btn_export_pdf.setStyleSheet(f"""
+                QPushButton {{
+                    padding: 5px 12px;
+                    font-size: 11px;
+                    font-family: {FONT_FAMILY_STACK};
+                    color: #94a3b8;
+                    border: 1px dashed #cbd5e1;
+                    border-radius: 5px;
+                    background-color: #f8fafc;
+                    min-width: 120px;
+                    min-height: 26px;
+                }}
+            """)
+
+    def _on_export_pdf_clicked(self):
+        """Emits signal requesting PDF reconstruction export."""
+        self.export_pdf_requested.emit()
 
     def get_export_dir(self) -> Path:
         """

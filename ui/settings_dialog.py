@@ -2,18 +2,27 @@
 ui/settings_dialog.py
 ---------------------
 Application settings dialog governing offline defaults, local translation models,
-and optional cloud AI enhancements.
+and optional cloud / local AI enhancements.
 
 Provides:
-1. Offline Translation Models manager:
+1. Offline Translation Engine Routing & Compare Mode.
+2. AI4Bharat IndicTrans2 offline models manager.
+3. Argos Translate offline models manager:
    - Scans models/argos/ folder automatically for .argosmodel packages.
    - View installed offline translation language pairs.
    - View dropdown target languages availability at a glance.
    - User-controlled import: copies chosen file into models/argos/ and scans.
    - Immediate cache refresh upon installation.
-2. Strict master toggle: 'Allow online AI enhancement' (OFF by default).
-3. Cloud AI provider selection (OpenAI, Google Gemini, OpenAI-Compatible).
-4. Secure API key entry with OS keychain storage via keyring.
+4. Strict master toggle: 'Allow online AI enhancement' (OFF by default).
+5. Multi-provider AI enhancement selection:
+   - Anthropic Claude
+   - OpenAI
+   - Google Gemini
+   - Generic OpenAI-Compatible
+   - Local Model Server (100% Offline / On-Device)
+6. Secure API key entry with OS keychain storage via keyring.
+7. Safe connection test sending short harmless fixed sentence after confirmation.
+8. AI request audit log viewing and clearing (metadata only, zero document text/keys).
 """
 
 import shutil
@@ -35,16 +44,34 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QWidget,
     QSpinBox,
+    QGridLayout,
 )
 from PySide6.QtCore import Qt
-from config.settings import FONT_FAMILY_STACK, ARGOS_MODELS_DIR, INDICTRANS2_MODELS_DIR
+from config.settings import (
+    FONT_FAMILY_STACK,
+    ARGOS_MODELS_DIR,
+    INDICTRANS2_MODELS_DIR,
+    AI_SUPPORTED_PROVIDERS,
+)
 from services.keychain_manager import (
     store_api_key,
     get_api_key,
+    delete_api_key,
     store_provider_config,
     get_provider_config,
     is_keyring_available,
+    is_provider_configured,
+    get_key_storage_type,
+    mask_key,
 )
+from services.ai_provider import (
+    get_ai_provider,
+    load_provider_config,
+    AIProviderError,
+    BaseAIProvider,
+)
+from ui.ai_enhance_dialog import AIAuditLogDialog
+from services.audit_logger import clear_ai_audit_log
 from translation.argos_translator import ArgosTranslator
 from translation.indictrans2_translator import IndicTrans2Translator
 from translation.indictrans2_mapping import DIRECTION_NAMES
@@ -71,13 +98,15 @@ class SettingsDialog(QDialog):
         self.compare_mode = compare_mode
         self.agreement_threshold = agreement_threshold
         self.models_updated = False
+        self._provider_status_widgets = {}
+        self._provider_meta_cache = load_provider_config().get("providers", {})
         self._init_ui()
 
     def _init_ui(self):
         self.setWindowTitle("Settings & Preferences")
         self.setSizeGripEnabled(True)
-        self.setMinimumSize(540, 580)
-        self.resize(580, 680)
+        self.setMinimumSize(560, 620)
+        self.resize(620, 720)
 
         main_dialog_layout = QVBoxLayout(self)
         main_dialog_layout.setContentsMargins(16, 16, 16, 16)
@@ -358,7 +387,7 @@ class SettingsDialog(QDialog):
         scroll_layout.addWidget(trans_frame)
 
         # ==============================================================================
-        # Section 2: Online AI Enhancement Master Toggle (Strictly Optional)
+        # Section 4: Online & Local AI Enhancement (Strictly Optional, Default Off)
         # ==============================================================================
         ai_frame = QFrame()
         ai_frame.setObjectName("ai_frame")
@@ -371,8 +400,13 @@ class SettingsDialog(QDialog):
         """)
         ai_layout = QVBoxLayout(ai_frame)
         ai_layout.setContentsMargins(14, 14, 14, 14)
-        ai_layout.setSpacing(9)
+        ai_layout.setSpacing(10)
 
+        ai_header = QLabel("✨ <b>Online & Local AI Enhancement (Optional)</b>")
+        ai_header.setStyleSheet(f"font-size: 13px; font-weight: bold; color: #0f172a; font-family: {FONT_FAMILY_STACK};")
+        ai_layout.addWidget(ai_header)
+
+        # Master toggle
         self.chk_allow_ai = QCheckBox("Allow online AI enhancement (Default: Off)")
         self.chk_allow_ai.setChecked(self.ai_enhance_enabled)
         self.chk_allow_ai.setStyleSheet(f"font-weight: bold; font-size: 12px; color: #0f172a; font-family: {FONT_FAMILY_STACK};")
@@ -381,74 +415,256 @@ class SettingsDialog(QDialog):
 
         ai_desc = QLabel(
             "When disabled, the application is strictly 100% offline. "
-            "Enabling this allows you to voluntarily send selected document snippets to external cloud AI providers."
+            "Enabling this allows you to voluntarily enhance selected snippets with external cloud AI or a local model server."
         )
         ai_desc.setWordWrap(True)
         ai_desc.setStyleSheet(f"font-size: 10.5px; color: #64748b; font-family: {FONT_FAMILY_STACK};")
         ai_layout.addWidget(ai_desc)
 
-        # Provider Selector
-        prov_layout = QHBoxLayout()
-        prov_lbl = QLabel("AI Provider:")
-        prov_lbl.setStyleSheet(f"font-size: 11.5px; color: #334155; font-family: {FONT_FAMILY_STACK};")
-        prov_layout.addWidget(prov_lbl)
+        # Clear Note on Provider Data Policy
+        policy_frame = QFrame()
+        policy_frame.setStyleSheet("background-color: #fffbeb; border: 1px solid #fef08a; border-radius: 4px; padding: 6px 10px;")
+        policy_layout = QVBoxLayout(policy_frame)
+        policy_layout.setContentsMargins(4, 4, 4, 4)
+        policy_lbl = QLabel(
+            "⚠️ <b>Data Policy Notice:</b> Each provider has its own data handling, retention, and privacy policy. "
+            "Please review your provider's terms before transmitting document text. "
+            "This application cannot control how third-party external providers process or retain data.<br>"
+            "<i>Tip: For 100% private processing with zero network traffic, use the <b>Local Model Server</b> option.</i>"
+        )
+        policy_lbl.setWordWrap(True)
+        policy_lbl.setStyleSheet(f"font-size: 10.5px; color: #92400e; font-family: {FONT_FAMILY_STACK}; line-height: 1.3;")
+        policy_layout.addWidget(policy_lbl)
+        ai_layout.addWidget(policy_frame)
+
+        # Provider Overview & Configuration List
+        prov_list_title = QLabel("Supported AI Providers Status:")
+        prov_list_title.setStyleSheet(f"font-size: 11.5px; font-weight: 600; color: #1e293b; font-family: {FONT_FAMILY_STACK}; margin-top: 4px;")
+        ai_layout.addWidget(prov_list_title)
+
+        prov_table_frame = QFrame()
+        prov_table_frame.setStyleSheet("background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px; padding: 4px;")
+        prov_table_layout = QVBoxLayout(prov_table_frame)
+        prov_table_layout.setContentsMargins(6, 6, 6, 6)
+        prov_table_layout.setSpacing(6)
+
+        providers_meta = [
+            ("anthropic", "Anthropic Claude (Messages API)"),
+            ("openai", "OpenAI (Chat Completions API)"),
+            ("gemini", "Google Gemini (generateContent API)"),
+            ("deepseek", "DeepSeek (Chat Completions API)"),
+            ("openai_compatible", "OpenAI-Compatible (Custom / Cloud Host)"),
+            ("local_server", "Local Model Server (Offline / On-Device)"),
+        ]
+
+        for p_id, p_name in providers_meta:
+            row_layout = QHBoxLayout()
+            row_layout.setSpacing(8)
+
+            lbl_name = QLabel(p_name)
+            lbl_name.setStyleSheet(f"font-size: 11px; font-weight: 600; color: #1e293b; font-family: {FONT_FAMILY_STACK};")
+            row_layout.addWidget(lbl_name, stretch=2)
+
+            status_lbl = QLabel("Checking...")
+            status_lbl.setStyleSheet(f"font-size: 10.5px; color: #64748b; font-family: {FONT_FAMILY_STACK};")
+            self._provider_status_widgets[p_id] = status_lbl
+            row_layout.addWidget(status_lbl, stretch=2)
+
+            btn_cfg = QPushButton("Configure")
+            btn_cfg.setCursor(Qt.PointingHandCursor)
+            btn_cfg.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #ffffff;
+                    color: #2563eb;
+                    border: 1px solid #cbd5e1;
+                    border-radius: 3px;
+                    padding: 2px 8px;
+                    font-size: 10.5px;
+                    font-family: {FONT_FAMILY_STACK};
+                }}
+                QPushButton:hover {{
+                    background-color: #eff6ff;
+                    border-color: #3b82f6;
+                }}
+            """)
+            btn_cfg.clicked.connect(lambda _, pid=p_id: self._select_provider(pid))
+            row_layout.addWidget(btn_cfg)
+
+            prov_table_layout.addLayout(row_layout)
+
+        ai_layout.addWidget(prov_table_frame)
+
+        # Provider Configuration Box
+        cfg_box_title = QLabel("Active Provider Configuration:")
+        cfg_box_title.setStyleSheet(f"font-size: 11.5px; font-weight: 600; color: #1e293b; font-family: {FONT_FAMILY_STACK}; margin-top: 6px;")
+        ai_layout.addWidget(cfg_box_title)
+
+        prov_select_layout = QHBoxLayout()
+        prov_lbl = QLabel("Selected Provider:")
+        prov_lbl.setStyleSheet(f"font-size: 11px; color: #334155; font-family: {FONT_FAMILY_STACK};")
+        prov_select_layout.addWidget(prov_lbl)
 
         self.combo_provider = QComboBox()
-        self.combo_provider.addItem("OpenAI (GPT-4o / GPT-4o-mini)", "openai")
-        self.combo_provider.addItem("Google Gemini (Gemini 1.5 Flash)", "gemini")
-        self.combo_provider.addItem("OpenAI-Compatible API (e.g. Qwen / Ollama / Local)", "openai_compatible")
+        self.combo_provider.addItem("Anthropic Claude (Messages API)", "anthropic")
+        self.combo_provider.addItem("OpenAI (Chat Completions)", "openai")
+        self.combo_provider.addItem("Google Gemini (generateContent)", "gemini")
+        self.combo_provider.addItem("DeepSeek (Chat Completions)", "deepseek")
+        self.combo_provider.addItem("OpenAI-Compatible API (Custom / Cloud)", "openai_compatible")
+        self.combo_provider.addItem("Local Model Server (Offline / On-Device)", "local_server")
 
-        idx = 0
-        if self.selected_provider == "gemini":
-            idx = 1
-        elif self.selected_provider in ("openai_compatible", "generic"):
-            idx = 2
+        idx = 1
+        for i in range(self.combo_provider.count()):
+            if self.combo_provider.itemData(i) == self.selected_provider:
+                idx = i
+                break
         self.combo_provider.setCurrentIndex(idx)
         self.combo_provider.currentIndexChanged.connect(self._on_provider_changed)
-        prov_layout.addWidget(self.combo_provider, stretch=1)
-        ai_layout.addLayout(prov_layout)
+        prov_select_layout.addWidget(self.combo_provider, stretch=1)
+        ai_layout.addLayout(prov_select_layout)
 
-        # Custom Endpoint & Model Name for Generic OpenAI-Compatible
-        saved_cfg = get_provider_config("openai_compatible")
-        self.lbl_base_url = QLabel("API Base Address:")
-        self.lbl_base_url.setStyleSheet(f"font-size: 11.5px; color: #334155; font-family: {FONT_FAMILY_STACK};")
+        # Base Address (for generic and local server)
+        self.lbl_base_url = QLabel("API Base Address / Endpoint:")
+        self.lbl_base_url.setStyleSheet(f"font-size: 11px; color: #334155; font-family: {FONT_FAMILY_STACK};")
         ai_layout.addWidget(self.lbl_base_url)
 
         self.txt_base_url = QLineEdit()
         self.txt_base_url.setPlaceholderText("e.g. http://localhost:11434/v1 or https://api.together.xyz/v1")
-        self.txt_base_url.setText(saved_cfg.get("base_url", "http://localhost:11434/v1"))
         ai_layout.addWidget(self.txt_base_url)
 
+        # Model Name
         self.lbl_model_name = QLabel("Model Name:")
-        self.lbl_model_name.setStyleSheet(f"font-size: 11.5px; color: #334155; font-family: {FONT_FAMILY_STACK};")
+        self.lbl_model_name.setStyleSheet(f"font-size: 11px; color: #334155; font-family: {FONT_FAMILY_STACK};")
         ai_layout.addWidget(self.lbl_model_name)
 
         self.txt_model_name = QLineEdit()
-        self.txt_model_name.setPlaceholderText("e.g. qwen2.5:7b or Qwen/Qwen2.5-72B-Instruct")
-        self.txt_model_name.setText(saved_cfg.get("model_name", "qwen2.5:7b"))
+        self.txt_model_name.setPlaceholderText("e.g. claude-3-5-sonnet-20241022, gpt-4o-mini, gemini-1.5-flash, qwen2.5:7b")
         ai_layout.addWidget(self.txt_model_name)
 
+        # Model and Pricing info label (example models disclaimer)
+        self.lbl_model_info = QLabel("")
+        self.lbl_model_info.setWordWrap(True)
+        self.lbl_model_info.setStyleSheet(f"font-size: 10px; color: #64748b; font-family: {FONT_FAMILY_STACK};")
+        ai_layout.addWidget(self.lbl_model_info)
+
         # API Key Field
-        key_lbl = QLabel("API Key:")
-        key_lbl.setStyleSheet(f"font-size: 11.5px; font-weight: 600; color: #334155; font-family: {FONT_FAMILY_STACK}; margin-top: 4px;")
-        ai_layout.addWidget(key_lbl)
+        self.lbl_key = QLabel("API Key:")
+        self.lbl_key.setStyleSheet(f"font-size: 11px; font-weight: 600; color: #334155; font-family: {FONT_FAMILY_STACK}; margin-top: 4px;")
+        ai_layout.addWidget(self.lbl_key)
 
         self.txt_api_key = QLineEdit()
         self.txt_api_key.setEchoMode(QLineEdit.Password)
-        self.txt_api_key.setPlaceholderText("Enter API Key (Optional for local Ollama, never saved to git)")
-        existing_key = get_api_key(self.selected_provider)
-        if existing_key:
-            self.txt_api_key.setText(existing_key)
+        self.txt_api_key.setPlaceholderText("Enter API Key (Never saved to files or git)")
         ai_layout.addWidget(self.txt_api_key)
 
-        keyring_status = (
-            "🔒 Protected by OS Secure Keychain (keyring available)."
-            if is_keyring_available()
-            else "ℹ️ Session-only in-memory storage (keyring not available; not saved to disk)."
-        )
-        self.lbl_key_status = QLabel(keyring_status)
+        self.lbl_key_status = QLabel("")
         self.lbl_key_status.setStyleSheet(f"font-size: 10px; color: #059669; font-family: {FONT_FAMILY_STACK};")
         ai_layout.addWidget(self.lbl_key_status)
+
+        # Key action buttons (Save Key, Remove Key, Test Connection)
+        key_btns_layout = QHBoxLayout()
+
+        self.btn_save_key = QPushButton("💾 Save / Update Key")
+        self.btn_save_key.setCursor(Qt.PointingHandCursor)
+        self.btn_save_key.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #f1f5f9;
+                color: #1e293b;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                padding: 5px 10px;
+                font-size: 11px;
+                font-family: {FONT_FAMILY_STACK};
+            }}
+            QPushButton:hover {{
+                background-color: #e2e8f0;
+            }}
+        """)
+        self.btn_save_key.clicked.connect(self._on_save_key_clicked)
+        key_btns_layout.addWidget(self.btn_save_key)
+
+        self.btn_remove_key = QPushButton("🗑️ Remove Key")
+        self.btn_remove_key.setCursor(Qt.PointingHandCursor)
+        self.btn_remove_key.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #fef2f2;
+                color: #991b1b;
+                border: 1px solid #fecaca;
+                border-radius: 4px;
+                padding: 5px 10px;
+                font-size: 11px;
+                font-family: {FONT_FAMILY_STACK};
+            }}
+            QPushButton:hover {{
+                background-color: #fee2e2;
+            }}
+        """)
+        self.btn_remove_key.clicked.connect(self._on_remove_key_clicked)
+        key_btns_layout.addWidget(self.btn_remove_key)
+
+        self.btn_test_conn = QPushButton("🧪 Test Connection...")
+        self.btn_test_conn.setCursor(Qt.PointingHandCursor)
+        self.btn_test_conn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #eff6ff;
+                color: #1d4ed8;
+                border: 1px solid #bfdbfe;
+                border-radius: 4px;
+                padding: 5px 12px;
+                font-size: 11px;
+                font-weight: 600;
+                font-family: {FONT_FAMILY_STACK};
+            }}
+            QPushButton:hover {{
+                background-color: #dbeafe;
+            }}
+        """)
+        self.btn_test_conn.clicked.connect(self._on_test_connection_clicked)
+        key_btns_layout.addWidget(self.btn_test_conn)
+
+        key_btns_layout.addStretch()
+        ai_layout.addLayout(key_btns_layout)
+
+        # Audit Log Management Row
+        audit_row = QHBoxLayout()
+        self.btn_view_audit = QPushButton("📋 View AI Request Audit Log...")
+        self.btn_view_audit.setCursor(Qt.PointingHandCursor)
+        self.btn_view_audit.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #f8fafc;
+                color: #334155;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                padding: 5px 10px;
+                font-size: 11px;
+                font-family: {FONT_FAMILY_STACK};
+            }}
+            QPushButton:hover {{
+                background-color: #f1f5f9;
+            }}
+        """)
+        self.btn_view_audit.clicked.connect(self._on_view_audit_clicked)
+        audit_row.addWidget(self.btn_view_audit)
+
+        self.btn_clear_audit = QPushButton("🗑️ Clear Audit Log")
+        self.btn_clear_audit.setCursor(Qt.PointingHandCursor)
+        self.btn_clear_audit.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #ffffff;
+                color: #64748b;
+                border: 1px solid #cbd5e1;
+                border-radius: 4px;
+                padding: 5px 10px;
+                font-size: 11px;
+                font-family: {FONT_FAMILY_STACK};
+            }}
+            QPushButton:hover {{
+                background-color: #f1f5f9;
+            }}
+        """)
+        self.btn_clear_audit.clicked.connect(self._on_clear_audit_clicked)
+        audit_row.addWidget(self.btn_clear_audit)
+        audit_row.addStretch()
+        ai_layout.addLayout(audit_row)
 
         scroll_layout.addWidget(ai_frame)
         scroll_layout.addStretch()
@@ -482,9 +698,246 @@ class SettingsDialog(QDialog):
         btn_layout.addWidget(btn_save)
 
         main_dialog_layout.addLayout(btn_layout)
+
+        # Initialize states
+        self._update_all_provider_statuses()
         self._on_provider_changed()
         self._update_controls_state()
         self._refresh_installed_pairs_list()
+
+    def _select_provider(self, prov_id: str):
+        """Switches the active provider in the combo box to the specified provider."""
+        for i in range(self.combo_provider.count()):
+            if self.combo_provider.itemData(i) == prov_id:
+                self.combo_provider.setCurrentIndex(i)
+                break
+
+    def _update_all_provider_statuses(self):
+        """Refreshes status labels for all supported providers in the status table."""
+        for p_id, status_lbl in self._provider_status_widgets.items():
+            is_local = (p_id == "local_server")
+            storage_type = get_key_storage_type(p_id, is_local=is_local)
+            if storage_type == "local_no_key":
+                status_lbl.setText("🟢 On-Device (No key needed — 100% Offline)")
+                status_lbl.setStyleSheet(f"font-size: 10.5px; color: #166534; font-weight: 600; font-family: {FONT_FAMILY_STACK};")
+            elif storage_type == "keychain":
+                status_lbl.setText("🔒 Configured (Secure OS Keychain)")
+                status_lbl.setStyleSheet(f"font-size: 10.5px; color: #047857; font-weight: 600; font-family: {FONT_FAMILY_STACK};")
+            elif storage_type == "memory":
+                status_lbl.setText("ℹ️ Configured (In-Memory Session Only)")
+                status_lbl.setStyleSheet(f"font-size: 10.5px; color: #0284c7; font-weight: 600; font-family: {FONT_FAMILY_STACK};")
+            else:
+                status_lbl.setText("⚪ Not Configured")
+                status_lbl.setStyleSheet(f"font-size: 10.5px; color: #94a3b8; font-family: {FONT_FAMILY_STACK};")
+
+    def _on_toggle_ai_allowed(self):
+        self._update_controls_state()
+
+    def _update_controls_state(self):
+        enabled = self.chk_allow_ai.isChecked()
+        self.combo_provider.setEnabled(enabled)
+        self.txt_api_key.setEnabled(enabled and (self.combo_provider.currentData() != "local_server"))
+        self.txt_base_url.setEnabled(enabled)
+        self.txt_model_name.setEnabled(enabled)
+        self.btn_save_key.setEnabled(enabled and (self.combo_provider.currentData() != "local_server"))
+        self.btn_remove_key.setEnabled(enabled and (self.combo_provider.currentData() != "local_server"))
+        self.btn_test_conn.setEnabled(enabled)
+
+    def _on_provider_changed(self):
+        prov = self.combo_provider.currentData()
+        is_generic_or_local = prov in ("openai_compatible", "local_server")
+        is_local = (prov == "local_server")
+
+        self.lbl_base_url.setVisible(is_generic_or_local)
+        self.txt_base_url.setVisible(is_generic_or_local)
+
+        meta = self._provider_meta_cache.get(prov, {})
+        saved_cfg = get_provider_config(prov)
+
+        # Set Base URL
+        if is_generic_or_local:
+            def_base = meta.get("default_base_url", "http://localhost:11434/v1" if is_local else "https://api.together.xyz/v1")
+            self.txt_base_url.setText(saved_cfg.get("base_url") or def_base)
+
+        # Set Model Name
+        def_model = meta.get("default_model", "qwen2.5:7b" if is_local else "gpt-4o-mini")
+        self.txt_model_name.setText(saved_cfg.get("model_name") or def_model)
+
+        # Example models and info
+        example_models = ", ".join(meta.get("example_models", []))
+        docs = meta.get("api_docs", "")
+        pricing = meta.get("pricing_info", "")
+        info_lines = []
+        if example_models:
+            info_lines.append(f"Example models: {example_models} (Examples only; check provider docs).")
+        if pricing:
+            info_lines.append(f"{pricing}")
+        if docs:
+            info_lines.append(f"Docs: {docs}")
+        self.lbl_model_info.setText("\n".join(info_lines))
+
+        # Handle API Key
+        if is_local:
+            self.lbl_key.setVisible(False)
+            self.txt_api_key.setVisible(False)
+            self.btn_save_key.setVisible(False)
+            self.btn_remove_key.setVisible(False)
+            self.lbl_key_status.setText("🟢 Local server requires no API key. Processing is strictly on-device.")
+            self.lbl_key_status.setStyleSheet(f"font-size: 10px; color: #166534; font-weight: 600; font-family: {FONT_FAMILY_STACK};")
+        else:
+            self.lbl_key.setVisible(True)
+            self.txt_api_key.setVisible(True)
+            self.btn_save_key.setVisible(True)
+            self.btn_remove_key.setVisible(True)
+            existing_key = get_api_key(prov)
+            if existing_key:
+                self.txt_api_key.setText(mask_key(existing_key))
+            else:
+                self.txt_api_key.clear()
+
+            storage_type = get_key_storage_type(prov, is_local=False)
+            if storage_type == "keychain":
+                self.lbl_key_status.setText("🔒 Protected by OS Secure Keychain (keyring available).")
+                self.lbl_key_status.setStyleSheet(f"font-size: 10px; color: #047857; font-family: {FONT_FAMILY_STACK};")
+            elif storage_type == "memory":
+                self.lbl_key_status.setText("ℹ️ Session-only in-memory storage (keyring not available; not saved to disk).")
+                self.lbl_key_status.setStyleSheet(f"font-size: 10px; color: #0284c7; font-family: {FONT_FAMILY_STACK};")
+            else:
+                self.lbl_key_status.setText("⚪ No API key configured. Enter a key above and click 'Save / Update Key'.")
+                self.lbl_key_status.setStyleSheet(f"font-size: 10px; color: #64748b; font-family: {FONT_FAMILY_STACK};")
+
+        self._update_all_provider_statuses()
+        self._update_controls_state()
+
+    def _on_save_key_clicked(self):
+        prov = self.combo_provider.currentData()
+        if prov == "local_server":
+            return
+        raw_key = self.txt_api_key.text().strip()
+        if not raw_key or raw_key.startswith("••••••••"):
+            QMessageBox.warning(self, "Empty Key", "Please enter a valid API key to save.")
+            return
+
+        in_keychain = store_api_key(prov, raw_key)
+        self.txt_api_key.setText(mask_key(raw_key))
+        self._update_all_provider_statuses()
+        self._on_provider_changed()
+
+        msg = (
+            f"API key for {self.combo_provider.currentText()} securely saved to your Operating System Keychain."
+            if in_keychain
+            else f"API key for {self.combo_provider.currentText()} stored in session memory (Keyring unavailable)."
+        )
+        QMessageBox.information(self, "Key Saved", msg)
+
+    def _on_remove_key_clicked(self):
+        prov = self.combo_provider.currentData()
+        if prov == "local_server":
+            return
+        if not get_api_key(prov):
+            QMessageBox.information(self, "No Key", f"No key is currently stored for {self.combo_provider.currentText()}.")
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Remove API Key",
+            f"Are you sure you want to remove the stored API key for {self.combo_provider.currentText()}?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm == QMessageBox.Yes:
+            delete_api_key(prov)
+            self.txt_api_key.clear()
+            self._update_all_provider_statuses()
+            self._on_provider_changed()
+            QMessageBox.information(self, "Key Removed", f"API key for {self.combo_provider.currentText()} has been removed.")
+
+    def _on_test_connection_clicked(self):
+        prov = self.combo_provider.currentData()
+        is_local = (prov == "local_server")
+        prov_name = self.combo_provider.currentText()
+        model = self.txt_model_name.text().strip()
+        base_url = self.txt_base_url.text().strip() if prov in ("openai_compatible", "local_server") else None
+
+        key_input = self.txt_api_key.text().strip()
+        stored_key = get_api_key(prov) or ""
+        api_key = stored_key if key_input.startswith("••••••••") else (key_input or stored_key)
+
+        if not is_local and not api_key:
+            QMessageBox.warning(
+                self,
+                "API Key Required",
+                f"Please enter and save an API key for {prov_name} before running a connection test."
+            )
+            return
+
+        test_sentence = "Hello! Test connection from Local AI Document System."
+        char_count = len(test_sentence)
+        tokens_est = max(1, char_count // 4)
+
+        try:
+            temp_prov = get_ai_provider(prov, api_key=api_key, base_url=base_url, model_name=model)
+            host_name = temp_prov.get_host_name()
+        except Exception:
+            host_name = "api.deepseek.com" if prov == "deepseek" else "external host"
+
+        dest_desc = "your local machine (localhost)" if is_local else f"cloud host <b>{host_name}</b> ({prov_name})"
+        privacy_warn = (
+            "<b>Offline Notice:</b> This test request is processed completely on your local computer. No data leaves your machine."
+            if is_local else
+            f"<b>Privacy Warning:</b> This test request will leave this computer and contact the cloud host <b>{host_name}</b>."
+        )
+
+        confirm_box = QMessageBox(self)
+        confirm_box.setWindowTitle("Confirm Test Connection")
+        confirm_box.setIcon(QMessageBox.Question)
+        confirm_box.setText(
+            f"<b>Test Connection Request</b><br><br>"
+            f"<b>Provider:</b> {prov_name}<br>"
+            f"<b>Model:</b> {model}<br>"
+            f"<b>Destination:</b> {dest_desc}<br>"
+            f"<b>Test Sentence:</b> <code>'{test_sentence}'</code><br>"
+            f"<b>Payload Metrics:</b> {char_count} characters, ~{tokens_est} tokens<br><br>"
+            f"{privacy_warn}<br><br>"
+            f"Do you want to send this test request now?"
+        )
+        confirm_box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        confirm_box.setDefaultButton(QMessageBox.Cancel)
+
+        if confirm_box.exec() != QMessageBox.Yes:
+            return
+
+        try:
+            provider = get_ai_provider(prov, api_key=api_key, base_url=base_url, model_name=model)
+            resp = provider.enhance(test_sentence, task="grammar")
+            QMessageBox.information(
+                self,
+                "Connection Successful",
+                f"Successfully connected to {prov_name}!\n\nResponse received:\n{resp[:200]}"
+            )
+        except Exception as e:
+            sanitized_err = str(e)
+            if api_key:
+                sanitized_err = sanitized_err.replace(api_key, "[REDACTED_KEY]")
+            QMessageBox.critical(
+                self,
+                "Connection Test Failed",
+                f"Connection test failed for {prov_name}:\n\n{sanitized_err}"
+            )
+
+    def _on_view_audit_clicked(self):
+        dlg = AIAuditLogDialog(parent=self)
+        dlg.exec()
+
+    def _on_clear_audit_clicked(self):
+        confirm = QMessageBox.question(
+            self,
+            "Clear Audit Log",
+            "Are you sure you want to clear the AI request audit log? This cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm == QMessageBox.Yes:
+            clear_ai_audit_log()
+            QMessageBox.information(self, "Audit Log Cleared", "The AI request audit log has been cleared.")
 
     def _refresh_installed_pairs_list(self):
         """Scans models/argos/ and refreshes the list of installed and available language pairs."""
@@ -492,12 +945,10 @@ class SettingsDialog(QDialog):
         self.list_target_availability.clear()
 
         translator = ArgosTranslator()
-        # Automatically scan models/argos/ on refresh
         translator.scan_and_install_models_folder()
         translator.refresh_installed_languages()
         pairs = translator.get_installed_pairs_info()
 
-        # Update Installed Models List
         if not pairs:
             self.lbl_installed_summary.setText("Installed Model Packages: 0 models installed")
             item = QListWidgetItem("⚠️ No offline translation models installed in models/argos/.")
@@ -510,7 +961,6 @@ class SettingsDialog(QDialog):
                 item = QListWidgetItem(label)
                 self.list_installed_pairs.addItem(item)
 
-        # Update Target Languages Availability List (from English)
         target_avail = translator.get_target_languages_availability(source="eng")
         ready_count = sum(1 for t in target_avail if t["can_translate"])
         self.lbl_targets_summary.setText(
@@ -538,7 +988,6 @@ class SettingsDialog(QDialog):
                     item.setToolTip(t["message"])
             self.list_target_availability.addItem(item)
 
-        # Refresh IndicTrans2 model directions status
         self._refresh_indictrans2_list()
 
     def _refresh_indictrans2_list(self):
@@ -563,13 +1012,11 @@ class SettingsDialog(QDialog):
             self.list_indic_directions.addItem(item)
 
     def _on_indictrans2_guide_clicked(self):
-        """Displays IndicTrans2 setup instructions and Hugging Face model details."""
         translator = IndicTrans2Translator()
         guide = translator.get_installation_instructions()
         QMessageBox.information(self, "AI4Bharat IndicTrans2 Setup Guide", guide)
 
     def _on_import_model_clicked(self):
-        """Opens a file dialog for the user to select an .argosmodel file, copies it to models/argos/, and scans."""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "Select Argos Translation Model (.argosmodel)",
@@ -582,7 +1029,6 @@ class SettingsDialog(QDialog):
         src_p = Path(file_path)
         translator = ArgosTranslator()
 
-        # 1. Strictly validate the model package before copying
         is_valid, val_msg, meta = translator.validate_model_file(src_p)
         if not is_valid:
             QMessageBox.critical(
@@ -592,7 +1038,6 @@ class SettingsDialog(QDialog):
             )
             return
 
-        # 2. Copy the chosen file into models/argos/
         target_folder = Path(ARGOS_MODELS_DIR)
         target_folder.mkdir(parents=True, exist_ok=True)
         dest_p = target_folder / src_p.name
@@ -608,7 +1053,6 @@ class SettingsDialog(QDialog):
             )
             return
 
-        # 3. Trigger the folder scan to install the newly copied model
         scan_res = translator.scan_and_install_models_folder()
         self.models_updated = True
         self._refresh_installed_pairs_list()
@@ -623,27 +1067,6 @@ class SettingsDialog(QDialog):
             f"The language pair is now ready for 100% offline translation."
         )
 
-    def _on_toggle_ai_allowed(self):
-        self._update_controls_state()
-
-    def _update_controls_state(self):
-        enabled = self.chk_allow_ai.isChecked()
-        self.combo_provider.setEnabled(enabled)
-        self.txt_api_key.setEnabled(enabled)
-        self.txt_base_url.setEnabled(enabled)
-        self.txt_model_name.setEnabled(enabled)
-
-    def _on_provider_changed(self):
-        prov = self.combo_provider.currentData()
-        is_generic = prov in ("openai_compatible", "generic")
-        self.lbl_base_url.setVisible(is_generic)
-        self.txt_base_url.setVisible(is_generic)
-        self.lbl_model_name.setVisible(is_generic)
-        self.txt_model_name.setVisible(is_generic)
-
-        existing_key = get_api_key(prov)
-        self.txt_api_key.setText(existing_key or "")
-
     def _on_save_clicked(self):
         self.ai_enhance_enabled = self.chk_allow_ai.isChecked()
         self.selected_provider = self.combo_provider.currentData()
@@ -651,15 +1074,16 @@ class SettingsDialog(QDialog):
         self.compare_mode = self.chk_compare_mode.isChecked()
         self.agreement_threshold = self.spin_threshold.value() / 100.0
 
-        if self.ai_enhance_enabled:
-            api_key = self.txt_api_key.text().strip()
-            if api_key:
-                store_api_key(self.selected_provider, api_key)
+        prov = self.selected_provider
+        cfg = {
+            "model_name": self.txt_model_name.text().strip(),
+        }
+        if prov in ("openai_compatible", "local_server"):
+            cfg["base_url"] = self.txt_base_url.text().strip()
+        store_provider_config(prov, cfg)
 
-            if self.selected_provider in ("openai_compatible", "generic"):
-                store_provider_config("openai_compatible", {
-                    "base_url": self.txt_base_url.text().strip() or "http://localhost:11434/v1",
-                    "model_name": self.txt_model_name.text().strip() or "qwen2.5:7b",
-                })
+        key_text = self.txt_api_key.text().strip()
+        if key_text and not key_text.startswith("••••••••") and prov != "local_server":
+            store_api_key(prov, key_text)
 
         self.accept()

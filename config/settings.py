@@ -89,7 +89,8 @@ TRANSLATION_AGREEMENT_THRESHOLD = 0.60       # Flag pages with agreement score b
 # Optional Cloud AI Enhancement Configuration (Strictly OFF by default)
 AI_ENHANCE_ENABLED_DEFAULT = False
 AI_ENHANCE_MAX_CHARS = 4000     # Maximum characters sent per authorized request
-AI_DEFAULT_PROVIDER = "openai"  # Options: 'openai', 'gemini'
+AI_DEFAULT_PROVIDER = "openai"  # Options: 'anthropic', 'openai', 'gemini', 'deepseek', 'openai_compatible', 'local_server'
+AI_SUPPORTED_PROVIDERS = ["anthropic", "openai", "gemini", "deepseek", "openai_compatible", "local_server"]
 STATUS_ONLINE_PROGRESS = "Online request in progress — Sending authorized snippet..."
 
 # Supported Document File Extensions

@@ -1,0 +1,79 @@
+{
+  "_notice": "Default model names and endpoints in this configuration file are examples. Please consult each provider's current official documentation for active model names, capabilities, and pricing. No prices or model names are hardcoded as facts by this application.",
+  "providers": {
+    "anthropic": {
+      "display_name": "Anthropic Claude",
+      "default_model": "claude-3-5-sonnet-20241022",
+      "example_models": [
+        "claude-3-5-sonnet-20241022",
+        "claude-3-5-haiku-20241022",
+        "claude-3-opus-20240229"
+      ],
+      "api_docs": "https://docs.anthropic.com/en/api/messages",
+      "pricing_info": "Check https://www.anthropic.com/pricing for current rates.",
+      "privacy_policy": "https://www.anthropic.com/privacy"
+    },
+    "openai": {
+      "display_name": "OpenAI",
+      "default_model": "gpt-4o-mini",
+      "example_models": [
+        "gpt-4o-mini",
+        "gpt-4o",
+        "gpt-4-turbo"
+      ],
+      "api_docs": "https://platform.openai.com/docs/api-reference/chat",
+      "pricing_info": "Check https://openai.com/pricing for current rates.",
+      "privacy_policy": "https://openai.com/privacy"
+    },
+    "gemini": {
+      "display_name": "Google Gemini",
+      "default_model": "gemini-1.5-flash",
+      "example_models": [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-2.0-flash-exp"
+      ],
+      "api_docs": "https://ai.google.dev/api/generate-content",
+      "pricing_info": "Check https://ai.google.dev/pricing for current rates.",
+      "privacy_policy": "https://policies.google.com/privacy"
+    },
+    "deepseek": {
+      "display_name": "DeepSeek",
+      "default_base_url": "https://api.deepseek.com",
+      "default_model": "deepseek-chat",
+      "example_models": [
+        "deepseek-chat",
+        "deepseek-reasoner"
+      ],
+      "api_docs": "https://api-docs.deepseek.com/api/create-chat-completion/",
+      "pricing_info": "Check https://api-docs.deepseek.com/quick_start/pricing for current rates.",
+      "privacy_policy": "https://www.deepseek.com/privacy"
+    },
+    "openai_compatible": {
+      "display_name": "OpenAI-Compatible (Custom / Cloud)",
+      "default_base_url": "https://api.together.xyz/v1",
+      "default_model": "Qwen/Qwen2.5-72B-Instruct",
+      "example_models": [
+        "Qwen/Qwen2.5-72B-Instruct",
+        "meta-llama/Llama-3.3-70B-Instruct",
+        "deepseek-ai/DeepSeek-V3"
+      ],
+      "api_docs": "https://platform.openai.com/docs/api-reference/chat",
+      "pricing_info": "Refer to your API hosting provider for current pricing.",
+      "privacy_policy": "Refer to your API provider for data handling policy."
+    },
+    "local_server": {
+      "display_name": "Local Model Server (Offline / On-Device)",
+      "default_base_url": "http://localhost:11434/v1",
+      "default_model": "qwen2.5:7b",
+      "example_models": [
+        "qwen2.5:7b",
+        "llama3.2:3b",
+        "mistral:7b"
+      ],
+      "api_docs": "http://localhost:11434",
+      "pricing_info": "Free (Runs 100% locally on this computer).",
+      "privacy_policy": "100% Private (No data leaves your computer)."
+    }
+  }
+}

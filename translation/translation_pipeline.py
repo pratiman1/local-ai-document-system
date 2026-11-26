@@ -37,6 +37,16 @@ from translation.translator_factory import get_translator
 from translation.quality_checker import evaluate_translation_sanity, TranslationSanityReport
 from translation.argos_translator import get_language_display_name
 from translation.agreement_metric import compute_agreement, AgreementResult
+from translation.indic_text_processor import (
+    clean_and_join_lines,
+    split_into_sentences,
+    clean_repetitive_phrases,
+    is_section_heading,
+    normalize_heading_prefix,
+    postprocess_english_translation,
+    audit_literal_translations,
+    GlossaryManager,
+)
 
 
 def chunk_text(text: str, max_chunk_chars: int = TRANSLATION_CHUNK_SIZE) -> List[str]:
@@ -81,9 +91,11 @@ def translate_page(
     secondary_translator: Optional[Translator] = None,
     compare_mode: bool = False,
     agreement_threshold: float = 0.60,
+    glossary_manager: Optional[GlossaryManager] = None,
 ) -> Dict[str, Any]:
     """
-    Translates a single page's text chunk by chunk, maintaining page structure.
+    Translates a single page's text with Unicode Indic pre-processing, line/word healing,
+    sentence segmentation, and glossary preservation with fallback.
     If compare_mode is True and secondary_translator is provided, runs the secondary
     engine sequentially and computes lexical agreement between engines.
     """
@@ -94,6 +106,9 @@ def translate_page(
         return {
             "page_number": p_num,
             "original_text": "",
+            "raw_extracted_text": "",
+            "cleaned_text": "",
+            "modified_words": [],
             "translated_text": "",
             "source_language": source_lang,
             "target_language": target_lang,
@@ -107,49 +122,112 @@ def translate_page(
             "comparison": None,
         }
 
+    # 1. Clean and join lines, filter real page numbers, clean doubled trailing characters
+    cleaned_text, modified_words = clean_and_join_lines(orig_text)
+    if not cleaned_text.strip():
+        cleaned_text = orig_text.strip()
+
     # Same language skip
     if source_lang.lower() == target_lang.lower():
         return {
             "page_number": p_num,
-            "original_text": orig_text,
-            "translated_text": orig_text,
+            "original_text": cleaned_text,
+            "raw_extracted_text": orig_text,
+            "cleaned_text": cleaned_text,
+            "modified_words": modified_words,
+            "translated_text": cleaned_text,
             "source_language": source_lang,
             "target_language": target_lang,
             "engine": translator.get_name(),
             "was_pivoted": False,
             "pivot_notice": f"Source and target languages are both '{source_lang}'. Translation skipped.",
-            "word_count": len(orig_text.split()),
-            "char_count": len(orig_text),
-            "sanity_report": evaluate_translation_sanity(orig_text, orig_text, source_lang, target_lang),
+            "word_count": len(cleaned_text.split()),
+            "char_count": len(cleaned_text),
+            "sanity_report": evaluate_translation_sanity(cleaned_text, cleaned_text, source_lang, target_lang),
             "skipped": True,
             "comparison": None,
         }
 
-    chunks = chunk_text(orig_text)
-    translated_chunks = []
+    # 2. Segment into complete sentences
+    sentences = split_into_sentences(cleaned_text)
+    if not sentences:
+        sentences = [cleaned_text]
+
+    gm = glossary_manager or GlossaryManager()
+
+    def _translate_sentence_with_glossary(sent: str, engine: Translator) -> Tuple[str, bool, str]:
+        masked_sent, tag_map, matched_terms = gm.mask_terms(sent, source_lang, target_lang)
+        was_piv = False
+        piv_notice = ""
+        if tag_map:
+            out: TranslationOutput = engine.translate(masked_sent, source=source_lang, target=target_lang)
+            if out.was_pivoted:
+                was_piv = True
+                piv_notice = out.notice
+            restored, all_found = gm.restore_terms(out.translated_text, tag_map)
+            # Condition 1: If any tag is missing or altered, re-translate without tags and apply safe text replacement
+            if not all_found:
+                raw_out: TranslationOutput = engine.translate(sent, source=source_lang, target=target_lang)
+                if raw_out.was_pivoted:
+                    was_piv = True
+                    piv_notice = raw_out.notice
+                restored = gm.apply_fallback_replacement(
+                    raw_out.translated_text, source_lang, target_lang, matched_terms
+                )
+            return restored, was_piv, piv_notice
+        else:
+            out: TranslationOutput = engine.translate(sent, source=source_lang, target=target_lang)
+            return out.translated_text, out.was_pivoted, out.notice
+
+    translated_sentences = []
     was_pivoted = False
     pivot_notice = ""
 
     # Primary translation
-    for chunk in chunks:
-        out: TranslationOutput = translator.translate(chunk, source=source_lang, target=target_lang)
-        translated_chunks.append(out.translated_text)
-        if out.was_pivoted:
+    for sent in sentences:
+        res_text, p_piv, p_not = _translate_sentence_with_glossary(sent, translator)
+        translated_sentences.append(res_text)
+        if p_piv:
             was_pivoted = True
-            pivot_notice = out.notice
+            pivot_notice = p_not
 
-    full_translated = "\n\n".join(translated_chunks)
-    sanity = evaluate_translation_sanity(orig_text, full_translated, source_lang, target_lang)
+    # Reassemble with heading and paragraph structure preserved
+    cleaned_paras = [p.strip() for p in cleaned_text.split("\n\n") if p.strip()]
+    translated_parts = []
+    for i, res_text in enumerate(translated_sentences):
+        src_sent = sentences[i] if i < len(sentences) else ""
+        if is_section_heading(src_sent):
+            res_text = normalize_heading_prefix(src_sent, res_text)
+
+        if i == 0:
+            translated_parts.append(res_text)
+        elif is_section_heading(src_sent) or (i > 0 and is_section_heading(sentences[i-1])):
+            translated_parts.append("\n\n" + res_text)
+        else:
+            is_para_start = any(p.strip().startswith(src_sent.strip()) for p in cleaned_paras[1:])
+            if is_para_start:
+                translated_parts.append("\n\n" + res_text)
+            else:
+                translated_parts.append(" " + res_text)
+
+    full_translated = "".join(translated_parts).strip()
+    full_translated = clean_repetitive_phrases(full_translated)
+
+    changed_pronouns = []
+    if target_lang == "eng":
+        full_translated, changed_pronouns = postprocess_english_translation(full_translated, return_records=True)
+
+    sanity = evaluate_translation_sanity(cleaned_text, full_translated, source_lang, target_lang)
 
     # Optional Sequential Compare Mode (Never run in parallel to protect 8 GB RAM)
     comparison_info = None
     if compare_mode and secondary_translator is not None:
         try:
-            sec_translated_chunks = []
-            for chunk in chunks:
-                sec_out: TranslationOutput = secondary_translator.translate(chunk, source=source_lang, target=target_lang)
-                sec_translated_chunks.append(sec_out.translated_text)
-            secondary_text = "\n\n".join(sec_translated_chunks)
+            sec_translated_sentences = []
+            for sent in sentences:
+                sec_res, _, _ = _translate_sentence_with_glossary(sent, secondary_translator)
+                sec_translated_sentences.append(sec_res)
+            secondary_text = " ".join(sec_translated_sentences).strip()
             agree_res = compute_agreement(full_translated, secondary_text, threshold=agreement_threshold)
             comparison_info = {
                 "primary_engine": translator.get_name(),
@@ -178,7 +256,10 @@ def translate_page(
 
     return {
         "page_number": p_num,
-        "original_text": orig_text,
+        "original_text": cleaned_text,
+        "raw_extracted_text": orig_text,
+        "cleaned_text": cleaned_text,
+        "modified_words": modified_words,
         "translated_text": full_translated,
         "source_language": source_lang,
         "target_language": target_lang,
@@ -190,6 +271,8 @@ def translate_page(
         "sanity_report": sanity,
         "skipped": False,
         "comparison": comparison_info,
+        "literal_audit": audit_literal_translations(full_translated, target_lang),
+        "changed_pronouns": changed_pronouns,
     }
 
 
@@ -202,7 +285,7 @@ def save_translation_recovery(recovery_path: Path, state: Dict[str, Any]):
     try:
         tmp = recovery_path.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+            json.dump(state, f, ensure_ascii=False, indent=2, default=str)
         tmp.replace(recovery_path)
     except Exception:
         pass

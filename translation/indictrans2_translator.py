@@ -16,6 +16,11 @@ Features:
 """
 
 import os
+# Force MPS fallback environment variable before torch import as safety net
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+
+import sys
+import types
 import gc
 import re
 from pathlib import Path
@@ -54,12 +59,22 @@ _INDIC_TOOLKIT_AVAILABLE = False
 try:
     import torch
     _TORCH_AVAILABLE = True
+    try:
+        torch.set_num_threads(4)
+    except Exception:
+        pass
 except ImportError:
     torch = None
 
 try:
     import transformers
     _TRANSFORMERS_AVAILABLE = True
+    # Transformers 5.x compatibility shim for IndicTransToolkit
+    if not hasattr(transformers, "PreTrainedTokenizerBase"):
+        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+        transformers.PreTrainedTokenizerBase = PreTrainedTokenizerBase
+    import transformers.tokenization_utils
+    transformers.tokenization_utils.PreTrainedTokenizerBase = transformers.PreTrainedTokenizerBase
 except ImportError:
     transformers = None
 
@@ -198,16 +213,92 @@ class IndicTrans2Translator(Translator):
                     pass
 
     def _determine_device(self) -> str:
-        """Determines best execution device for 8 GB RAM Mac / Windows / Linux."""
-        if not _TORCH_AVAILABLE or torch is None:
-            return "cpu"
-        # Apple Silicon MPS
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return "mps"
-        # NVIDIA CUDA
-        if torch.cuda.is_available():
-            return "cuda"
+        """Determines best execution device for 8 GB RAM Mac / Windows / Linux.
+
+        Always forces 'cpu' to prevent Apple Silicon MPS datatype mismatch assertions
+        and ensure stable float32 inference across all platforms.
+        """
         return "cpu"
+
+    @staticmethod
+    def _apply_runtime_shims():
+        """Ensures in-memory Transformers 5.x shims are active for dynamic model loading."""
+        import sys
+        import types
+        import torch
+
+        # 1. onnx stub
+        if "transformers.onnx" not in sys.modules:
+            onnx_mod = types.ModuleType("transformers.onnx")
+            onnx_mod.__path__ = []
+            onnx_mod.OnnxConfig = type("OnnxConfig", (), {})
+            onnx_mod.OnnxSeq2SeqConfigWithPast = type("OnnxSeq2SeqConfigWithPast", (), {})
+            sys.modules["transformers.onnx"] = onnx_mod
+            onnx_utils_mod = types.ModuleType("transformers.onnx.utils")
+            onnx_utils_mod.compute_effective_axis_dimension = lambda *a, **kw: None
+            sys.modules["transformers.onnx.utils"] = onnx_utils_mod
+
+        # 2. attn mask stub (ensuring CPU and float32)
+        if "transformers.modeling_attn_mask_utils" not in sys.modules:
+            m = types.ModuleType("transformers.modeling_attn_mask_utils")
+            def _prepare_4d_attention_mask(mask, dtype, tgt_len=None):
+                if mask is None:
+                    return None
+                if mask.dim() == 4:
+                    return mask.to(device=torch.device("cpu"), dtype=torch.float32)
+                bsz, src_len = mask.size()
+                tgt_len = tgt_len if tgt_len is not None else src_len
+                expanded = mask[:, None, None, :].expand(bsz, 1, tgt_len, src_len).to(device=torch.device("cpu"), dtype=torch.float32)
+                inverted = 1.0 - expanded
+                return inverted.masked_fill(inverted.to(torch.bool), torch.finfo(torch.float32).min)
+
+            def _prepare_4d_causal_attention_mask(mask, input_shape, inputs_embeds, past_len, sliding=None):
+                bsz, tgt_len = input_shape
+                src_len = tgt_len + past_len
+                dev = torch.device("cpu")
+                dt = torch.float32
+                causal = torch.full((tgt_len, src_len), torch.finfo(dt).min, device=dev, dtype=dt)
+                cond = torch.arange(src_len, device=dev)
+                causal.masked_fill_(cond < (torch.arange(tgt_len, device=dev) + 1 + past_len).view(-1, 1), 0)
+                c4d = causal[None, None, :, :].expand(bsz, 1, tgt_len, src_len)
+                if mask is not None:
+                    if mask.dim() == 2:
+                        c4d = c4d + _prepare_4d_attention_mask(mask, dt, tgt_len)
+                    elif mask.dim() == 4:
+                        c4d = c4d + mask.to(device=dev, dtype=dt)
+                return c4d
+
+            m._prepare_4d_attention_mask = _prepare_4d_attention_mask
+            m._prepare_4d_attention_mask_for_sdpa = _prepare_4d_attention_mask
+            m._prepare_4d_causal_attention_mask = _prepare_4d_causal_attention_mask
+            m._prepare_4d_causal_attention_mask_for_sdpa = _prepare_4d_causal_attention_mask
+            sys.modules["transformers.modeling_attn_mask_utils"] = m
+
+        # 3. PreTrainedTokenizerBase special tokens map fix
+        import transformers
+        orig_new = transformers.PreTrainedTokenizerBase.__new__
+        if not getattr(orig_new, "_indictrans_patched", False):
+            def patched_new(cls, *args, **kwargs):
+                inst = orig_new(cls)
+                inst._special_tokens_map = {}
+                return inst
+            patched_new._indictrans_patched = True
+            transformers.PreTrainedTokenizerBase.__new__ = staticmethod(patched_new)
+
+        # 4. Dynamic module loader patch for tie_weights and _tie_or_clone_weights
+        import transformers.dynamic_module_utils as dmu
+        orig_get_class = dmu.get_class_from_dynamic_module
+        if not getattr(orig_get_class, "_indictrans_patched", False):
+            def patched_get_class(*args, **kwargs):
+                cls = orig_get_class(*args, **kwargs)
+                if hasattr(cls, "tie_weights"):
+                    orig_tw = cls.tie_weights
+                    cls.tie_weights = lambda self, *a, **kw: orig_tw(self)
+                if not hasattr(cls, "_tie_or_clone_weights"):
+                    cls._tie_or_clone_weights = lambda self, a, b: setattr(a, "weight", b.weight)
+                return cls
+            patched_get_class._indictrans_patched = True
+            dmu.get_class_from_dynamic_module = patched_get_class
 
     def _load_model_for_direction(self, direction: str):
         """Loads weights for the specified direction, unloading any previously active model."""
@@ -231,24 +322,55 @@ class IndicTrans2Translator(Translator):
                 instructions=self.get_installation_instructions(),
             )
 
+        self._apply_runtime_shims()
+
         device = self._determine_device()
         self._device = device
+
+        if _TORCH_AVAILABLE and torch is not None:
+            try:
+                torch.set_num_threads(4)
+            except Exception:
+                pass
 
         # Load IndicProcessor
         from IndicTransToolkit.processor import IndicProcessor
         self._ip = IndicProcessor(inference=True)
 
-        # Load Tokenizer & Model via Hugging Face Transformers
+        # Load Tokenizer & Model via Hugging Face Transformers strictly on CPU in float32
         from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
         self._tokenizer = AutoTokenizer.from_pretrained(str(dir_path), trust_remote_code=True)
         self._model = AutoModelForSeq2SeqLM.from_pretrained(
             str(dir_path),
             trust_remote_code=True,
             low_cpu_mem_usage=True,
-            torch_dtype=torch.float16 if device in ("cuda", "mps") else torch.float32,
+            dtype=torch.float32,
         )
-        self._model.to(device)
+        self._model.to("cpu")
         self._model.eval()
+
+        # Re-initialize non-persistent sinusoidal positional buffers with mathematical precision on CPU float32
+        def reset_pos_emb(mod, max_pos, dim, pad_idx):
+            weights = mod.get_embedding(max_pos + mod.offset, dim, pad_idx)
+            mod.register_buffer(
+                "weights",
+                weights.to(dtype=torch.float32, device=torch.device("cpu")),
+                persistent=False,
+            )
+
+        reset_pos_emb(
+            self._model.model.encoder.embed_positions,
+            self._model.config.max_source_positions,
+            self._model.config.encoder_embed_dim,
+            self._model.config.pad_token_id,
+        )
+        reset_pos_emb(
+            self._model.model.decoder.embed_positions,
+            self._model.config.max_target_positions,
+            self._model.config.decoder_embed_dim,
+            self._model.config.pad_token_id,
+        )
+
         self._current_direction = direction
 
     def get_route_details(self, source: str, target: str) -> Dict[str, Any]:
@@ -422,9 +544,10 @@ class IndicTrans2Translator(Translator):
         self._load_model_for_direction(direction)
 
         # Split text into sentences for bounded memory batching (<= 500 characters)
-        raw_sentences = [s.strip() for s in re.split(r"([.?!।\n]+)", text) if s.strip()]
+        from translation.indic_text_processor import split_into_sentences
+        raw_sentences = split_into_sentences(text)
         if not raw_sentences:
-            raw_sentences = [text]
+            raw_sentences = [text.strip()] if text.strip() else [text]
 
         # Combine sentence fragments to avoid tiny single-character chunks
         sentences = []
@@ -440,35 +563,43 @@ class IndicTrans2Translator(Translator):
             sentences.append(cur)
 
         try:
-            # Preprocess using IndicProcessor
-            batch = self._ip.preprocess_batch(sentences, src_lang=src_flores, tgt_lang=tgt_flores)
+            # Process in small chunks of 2 sentences to protect 8 GB RAM and avoid monolithic memory spikes
+            batch_size = 2
+            final_translations = []
 
-            # Tokenize
-            inputs = self._tokenizer(
-                batch,
-                src_lang=src_flores,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=256,
-            ).to(self._device)
+            for i in range(0, len(sentences), batch_size):
+                chunk_slice = sentences[i : i + batch_size]
+                batch = self._ip.preprocess_batch(chunk_slice, src_lang=src_flores, tgt_lang=tgt_flores)
 
-            # Generate
-            with torch.no_grad():
-                outputs = self._model.generate(
-                    **inputs,
-                    use_cache=True,
-                    min_length=0,
+                # Tokenize & explicitly ensure all input tensors are on CPU
+                inputs = self._tokenizer(
+                    batch,
+                    src_lang=src_flores,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
                     max_length=256,
-                    num_beams=1,
-                    num_return_sequences=1,
                 )
+                inputs = {k: v.to(device=torch.device("cpu")) for k, v in inputs.items()}
 
-            # Decode
-            decoded = self._tokenizer.batch_decode(outputs, skip_special_tokens=True)
+                # Generate
+                with torch.inference_mode():
+                    outputs = self._model.generate(
+                        **inputs,
+                        use_cache=True,
+                        min_length=0,
+                        max_length=256,
+                        num_beams=5,
+                        num_return_sequences=1,
+                    )
 
-            # Postprocess using IndicProcessor
-            final_translations = self._ip.postprocess_batch(decoded, lang=tgt_flores)
+                # Decode
+                decoded = self._tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+                # Postprocess using IndicProcessor
+                translated_slice = self._ip.postprocess_batch(decoded, lang=tgt_flores)
+                final_translations.extend(translated_slice)
+
             translated_result = " ".join(final_translations)
 
             return TranslationOutput(
